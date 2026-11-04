@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { createHash } from 'crypto';
 import { logger } from './logger';
 import { resolveCommonDir, resolveGitDir } from './gitPaths';
 import { peeledCommitFromTagObject } from './gitUtils';
@@ -50,11 +51,12 @@ export class RefsReader {
             this._readRefDir(path.join(dirs.refsDir, 'heads'), '', localMap);
             this._readRefDir(path.join(dirs.refsDir, 'remotes'), '', remoteMap);
 
+            // A newer loose ref must win over its older packed copy.
             for (const [refName, hash] of this._readPackedRefs(dirs.packedRefsPath)) {
                 if (refName.startsWith('refs/heads/')) {
-                    localMap.set(refName.substring(11), hash);
+                    if (!localMap.has(refName.substring(11))) {localMap.set(refName.substring(11), hash);}
                 } else if (refName.startsWith('refs/remotes/')) {
-                    remoteMap.set(refName.substring(13), hash);
+                    if (!remoteMap.has(refName.substring(13))) {remoteMap.set(refName.substring(13), hash);}
                 }
             }
 
@@ -81,9 +83,10 @@ export class RefsReader {
             const dirs = this._resolveDirs();
             this._readRefDir(path.join(dirs.refsDir, 'tags'), '', tagMap);
 
+            // A newer loose ref must win over its older packed copy.
             for (const [refName, hash] of this._readPackedRefs(dirs.packedRefsPath)) {
                 if (refName.startsWith('refs/tags/')) {
-                    tagMap.set(refName.substring(10), hash);
+                    if (!tagMap.has(refName.substring(10))) {tagMap.set(refName.substring(10), hash);}
                 }
             }
 
@@ -127,6 +130,34 @@ export class RefsReader {
             this._peelCache.set(hash, peeled);
             return peeled ?? undefined;
         } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * Fingerprint the refs traversed by `git log --all` plus this worktree's HEAD.
+     * Read fresh files rather than the display cache: fetch can move only remote
+     * refs, and filesystem watchers can miss events or still be debouncing them.
+     * Names are retained so deletion/creation and ref labels also trigger refresh.
+     */
+    readHistorySignature(): string | undefined {
+        const repo = this._getRepoPath();
+        const gitDir = repo ? resolveGitDir(repo) : undefined;
+        if (!gitDir) {return undefined;}
+        try {
+            const dirs = this._resolveDirs();
+            const refs = new Map(this._readPackedRefs(dirs.packedRefsPath));
+            // Loose refs override packed refs after fetch, until the next pack-refs.
+            this._readRefDir(dirs.refsDir, 'refs', refs);
+            const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+            // Upstream reassignment changes the displayed pair without moving any ref.
+            const configPaths = [path.join(resolveCommonDir(gitDir), 'config'), path.join(gitDir, 'config.worktree')];
+            const configs = configPaths.map(file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
+            return createHash('sha256').update(JSON.stringify([
+                head, configs, [...refs].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+            ])).digest('hex');
+        } catch (error) {
+            logger.debug('[GitCharm] Could not read history refs:', error);
             return undefined;
         }
     }

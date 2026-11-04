@@ -452,7 +452,7 @@ svg { flex: none; }
     color: var(--vscode-foreground);
     transform: scale(1.1);
 }
-#btn-refresh, #btn-reflog, #tg-graph, #btn-more-filters {
+#btn-refresh, #btn-reflog, #tg-graph, #btn-more-filters, #btn-history-mode {
     flex: none;
     width: 30px;
     height: 26px;
@@ -2509,3 +2509,23 @@ body.dialog-resizing * {
 .bitem.kcur, .bfolder.kcur, .bsec.kcur, .sitem.kcur, .witem.kcur, .frow.kcur {
     border-radius: 6px;
 }
+
+/* Branch endpoints and synchronization state remain visible above the history filters. */
+#history-sync { display: none; align-items: center; gap: 8px; padding: 7px 10px;
+    border-bottom: 1px solid var(--vscode-panel-border); font-size: 12px; flex-wrap: wrap; }
+.history-scope { color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+.history-pair { flex: 1; min-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-state { font-weight: 600; white-space: nowrap; }
+.history-state.synced { color: var(--vscode-gitDecoration-addedResourceForeground); }
+.history-state.pending { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
+.barr { white-space: nowrap; flex-shrink: 0; }
+
+/* Compact scope icon: combined history is highlighted; the tooltip explains both modes. */
+#btn-history-mode { padding: 0; }
+#btn-history-mode:hover { background: var(--vscode-toolbar-hoverBackground, #3c3c3c); }
+#btn-history-mode:disabled { opacity: 0.5; cursor: default; }
+#btn-history-mode[aria-pressed="true"] { background: var(--vscode-toolbar-activeBackground); color: var(--vscode-textLink-foreground); border: 1px solid var(--vscode-focusBorder); }
+
+.history-fetch-time { color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
+#btn-refresh.fetching svg { animation: gitcharm-fetch-spin 0.85s linear infinite; }
+@keyframes gitcharm-fetch-spin { to { transform: rotate(360deg); } }

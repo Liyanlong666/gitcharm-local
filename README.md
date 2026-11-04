@@ -1,3 +1,8 @@
+> Local build 0.1.12: defaults to the current local branch **and its configured upstream**, with visible ahead/behind/sync status. Fetch refreshes the paired history; the toolbar icon toggles Single branch / Local + remote and retains All branches in the Command Palette. No automatic pull, merge or checkout is added.
+>
+> 本地修订版 0.1.12：默认同图显示当前本地分支与其实际跟踪分支，明确显示已同步、领先、落后、分叉及数量。fetch 后自动刷新；工具栏图标按钮可切换“单分支 / 本地＋远程”，全部分支入口保留在命令面板。刷新按钮执行目标分支 Fetch＋刷新，并显示本按钮上次成功获取时间。统计以最近 fetch 的结果为准。不新增自动 pull、合并或切换分支。
+
+
 # GitCharm
 
 **English** | [简体中文](#简体中文)

@@ -1,3 +1,38 @@
+## 0.1.12 (Local) — 2026-10-31
+
+- btn-history-mode 复用原有工具栏按钮的尺寸、边框、圆角与悬停样式，单分支/组合图标改用固定 SVG，无图标字体依赖。
+- 删除 btn-all-branches DOM 及绑定，保留 idea-git.showAllBranches 命令，避免移除节点后访问空值中断 webview 初始化。
+
+## 0.1.11 (Local) — 2026-10-31
+
+- 模式按钮改为固定 codicon（单分支 git-branch、组合 git-compare），不显示文字；组合态高亮，aria-pressed、悬停和无障碍名称说明状态与目标操作。
+- 新增 branchFetch：本地分支解析 upstream/remotename/remoteref；无本地跟踪者的远程分支反向解析 fetch refspec，支持非 origin 远端和自定义 tracking 目标，不猜同名分支。
+- 手动按钮仅执行 fetch --no-recurse-submodules <remote> +<source>:refs/remotes/...；目的引用必须是 remote-tracking namespace。仓库路径在解析时固定，认证等待期间切仓库不重定向写入。
+- 新增类型化 fetchAndRefresh/setFetchState 消息。成功时间仅在 fetch 成功后按仓库、远端、源和目标保存至版本化 workspaceState；失败保留旧值。不以 FETCH_HEAD 文件时间冒充目标分支成功 fetch。
+- 请求期间防重入；随后保留选择刷新列表及同步数量。可见时间来自本按钮，其他工具/自动 fetch 不伪造此时间记录。
+
+## 0.1.10 (Local) — 2026-10-31
+
+- 顶部原“返回当前分支对”图标改为文字模式切换。当前模式显示在按钮上，工具提示说明点击后的范围；切换保留选择与筛选，不修改 Git checkout。
+- 单分支模式分别支持所选本地分支和远程分支。远程转组合视图时，优先使用当前本地跟踪分支，或唯一匹配的本地分支；多个非当前匹配/无匹配时禁用组合并解释原因，不默认配对同名或无关分支。
+- 会话内隐藏/显示保留模式，重新启动/切换仓库仍默认组合模式；全部分支入口保留。
+
+## 0.1.9 (Local) — 2026-10-31
+
+- 依据用户确认，将默认范围从全部分支调整为当前本地分支与配置 upstream 的并集。参考 JetBrains Git Log 的统一提交图及 incoming/outgoing 展示；不将同名 origin 分支推断为 upstream。
+- 新增只读 trackingHistory：解析完整 upstream 引用，以两端不可变 hash 查询提交图和 rev-list 对称差集计数。首次载入、刷新、分页、reveal 上方历史共用范围；特殊状态单独显示，不把缺失 upstream 报为“已同步”。
+- 首屏改用带 ticket 的原子 setData，移除旧的分支/提交分别异步覆盖路径；首次可见且仓库 ready 后明确启动轮询。旧的分支统计请求在 refs 变化或查询替换后不再发布。
+- 跟踪信息缓存加入失效代次，避免 fetch 前的请求回填过期计数；历史签名包含仓库与 worktree 配置，覆盖只改 upstream、不移动 refs 的情况。
+- 新增临时本地远程仓库验收用例，覆盖同步、仅落后、仅领先、分叉、非同名 upstream、缺失/无 upstream、linked worktree、detached HEAD 和查询期间 fetch。所有查询不改变工作区和暂存区。
+
+## 0.1.8 (Local) — 2026-10-29
+
+- 新增 `idea-git.defaultHistoryScope`（默认 `all`，可选 `lastSelected`）。仅新会话忽略旧分支筛选；当前会话显式选择仍可保留。预取、首屏和视图状态恢复统一使用此规则，并提供“显示全部本地和远程分支”按钮/命令。
+- GraphView 的可见态 2 秒轮询改用完整引用签名；自动 fetch 共用检测路径。签名读取当前 worktree 的 HEAD 与 commondir 下 loose/packed refs，不执行网络或变更命令。引用变化才重新查询，隐藏期间停止轮询，重新显示时检查差异。
+- 查询开始前记录签名，成功后才推进基线；并发轮询串行化，失败保留旧基线以便重试。图缓存键包含签名，覆盖启动预取与首次显示之间发生 fetch 的窗口。
+- loose refs 优先于 packed refs，防止 fetch 更新被旧 packed 内容覆盖；刷新继续保留所选提交及滚动位置。
+- 不新增自动 pull、merge、checkout 行为。保留现有自动 fetch 设置。
+
 # 更新日志（详细版）
 
 面向维护者：保留踩坑细节、实测数据与文件路径。随 VSIX 发布、市场页展示的简明版是 `CHANGELOG.md`；本文件位于 `docs/`，不进 VSIX。

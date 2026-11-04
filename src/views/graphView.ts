@@ -1,19 +1,26 @@
+import { BranchFetchTarget } from '../services/branchFetch';
+import { TrackingHistory, trackingLocalForSelection } from '../services/trackingHistory';
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { GitService, GraphCommit, FileStat, LogFilters, ReflogEntry, PushPreview, BranchDetails } from '../services/gitService';
-import { ExtToWebviewMessage, OperationKind, PersistedViewState, RepoUiState, WebviewToExtMessage } from './messages';
+import { ExtToWebviewMessage, HistoryFetchState, OperationKind, PersistedViewState, RepoUiState, WebviewToExtMessage } from './messages';
 import { logger } from '../services/logger';
 import { getFileIconPack, iconThemeResourceRoot, invalidateFileIconCache } from '../services/fileIcons';
 import { resolveGitDir } from '../services/gitPaths';
-import { EMPTY_TREE_HASH, isOperationStateFile, mergeCommitFileStats, repositoryKey, formatGitError } from '../services/gitUtils';
+import { EMPTY_TREE_HASH, isOperationStateFile, mergeCommitFileStats, repositoryKey, formatGitError, redactUrlCredentials } from '../services/gitUtils';
 import { openEditorDiff } from '../commands/helpers';
 import { GitBlobFileSystemProvider } from '../services/blobFs';
 import { FavoriteStore, favoritesOf, normalizeFavoriteStore, withFavoriteRenamed, withFavoriteToggled } from '../services/branchMarks';
 import { getLocale, t, webviewStrings } from '../i18n';
 
 interface GraphPayload {
+    fetchState?: HistoryFetchState;
+    tracking?: TrackingHistory;
+    historyMode?: 'all' | 'tracking' | 'branch';
+    scopeLabel?: string;
+    canCombineHistory?: boolean;
     commits: GraphCommit[];
     local: string[];
     remote: string[];
@@ -44,7 +51,7 @@ const BRANCH_POLL_MS = 2000;
 const SCREEN_COMMANDS: ReadonlySet<ExtToWebviewMessage['command']> = new Set([
     'setData', 'setBranches', 'setStashes', 'setWorktrees', 'setRepoState', 'setFavorites',
     'setCommits', 'setHeadHash', 'setInProgress', 'setDivergence', 'setCurrentBranch',
-    'setDetail', 'setFileIconTheme', 'syncFilters'
+    'setDetail', 'setFileIconTheme', 'syncFilters', 'setFetchState'
 ]);
 
 export class GraphViewProvider implements vscode.WebviewViewProvider {
@@ -114,9 +121,18 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     private _headDebounce: NodeJS.Timeout | undefined;
     private _operationDebounce: NodeJS.Timeout | undefined;
     private _lastKnownBranch: string | undefined;
-    // Tip of the rev the middle list is showing; a change means history moved
-    // outside this extension and the commit rows have to follow.
-    private _lastKnownTip: string | undefined;
+    // Snapshot of every local/remote ref and HEAD used by the displayed history.
+    // A remote-only fetch must invalidate this even when local HEAD is unchanged.
+    private _lastHistorySignature: string | undefined;
+    private _checkingHistory = false;
+    private _repoStateTicket = 0;
+    private _allHistoryOverride: boolean | undefined;
+    private _combineTracking = true;
+    private _manualFetching = false;
+    private _failedFetchKey: string | undefined;
+    private _viewFetchTarget: (BranchFetchTarget & { repository: string }) | undefined;
+    /** Immutable roots for subsequent pages of the displayed snapshot. */
+    private _historyRevisions: string[] | undefined;
     // Contents of refs/stash ('' when the repo has none); a change means a stash
     // was created, applied or dropped outside this extension.
     private _lastStashSignature: string | undefined;
@@ -301,6 +317,116 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         void this._reload(force);
     }
 
+    /** Clear only the branch scope; keep text filters and the inspected commit. */
+    showAllBranches(): void {
+        this._allHistoryOverride = true;
+        this._branch = undefined;
+        void vscode.commands.executeCommand('idea-git.mainView.focus');
+        void this._reload(true, true);
+    }
+
+    /** Return to the current local branch plus its actual upstream, without checking out anything. */
+    showTrackingHistory(): void {
+        this._combineTracking = true;
+        this._allHistoryOverride = false;
+        this._branch = undefined;
+        void vscode.commands.executeCommand('idea-git.mainView.focus');
+        void this._reload(true, true);
+    }
+
+    /** Toggle only the history scope. The selected ref and actual Git checkout stay unchanged. */
+    toggleHistoryMode(): void {
+        this._combineTracking = this._showAllHistory() ? true : !this._combineTracking;
+        this._allHistoryOverride = false;
+        void this._reload(true, true);
+    }
+
+    private _fetchKey(target: BranchFetchTarget & { repository: string }): string {
+        return JSON.stringify([repositoryKey(target.repository), target.remote, target.sourceRef, target.trackingRef]);
+    }
+
+    /** Read only validated, per-repository/per-target successful timestamps. */
+    private _fetchState(): HistoryFetchState {
+        const target = this._viewFetchTarget;
+        const saved = this._memento.get<{ version: number; times: Record<string, number> }>('idea-git.historyFetchTimes');
+        const value = target && saved?.version === 1 ? saved.times?.[this._fetchKey(target)] : undefined;
+        return {
+            busy: this._manualFetching,
+            target: target?.trackingRef.replace(/^refs\/remotes\//, ''),
+            lastSucceededAt: typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined,
+            failed: !!target && this._failedFetchKey === this._fetchKey(target)
+        };
+    }
+
+    /** Manual toolbar action; success time is recorded only after git fetch succeeds. */
+    private async _fetchAndRefresh(): Promise<void> {
+        if (this._manualFetching) {return;}
+        this._manualFetching = true;
+        const repository = this._gitService.repositoryPath;
+        let target: (BranchFetchTarget & { repository: string }) | undefined;
+        this._post({ command: 'setFetchState', state: this._fetchState() });
+        try {
+            target = await this._gitService.getBranchFetchTarget(this._branch);
+            if (repository !== this._gitService.repositoryPath) {return;}
+            if (!target) {
+                vscode.window.showInformationMessage(t('history.fetchLocalOnly'));
+                return;
+            }
+            this._viewFetchTarget = target;
+            this._post({ command: 'setFetchState', state: this._fetchState() });
+            await this._gitService.fetchBranchTarget(target);
+            const saved = this._memento.get<{ version: number; times: Record<string, number> }>('idea-git.historyFetchTimes');
+            const times = saved?.version === 1 && saved.times ? { ...saved.times } : {};
+            times[this._fetchKey(target)] = Date.now();
+            // Bound old remote/repository entries while retaining the newest success.
+            const entries = Object.entries(times).filter(([, value]) => Number.isFinite(value))
+                .sort((a, b) => b[1] - a[1]).slice(0, 100);
+            await this._memento.update('idea-git.historyFetchTimes', { version: 1, times: Object.fromEntries(entries) });
+            this._failedFetchKey = undefined;
+        } catch (error) {
+            if (target) {this._failedFetchKey = this._fetchKey(target);}
+            const message = redactUrlCredentials(formatGitError(error));
+            logger.error('[GitCharm] History fetch failed:', message);
+            vscode.window.showErrorMessage(t('fetch.failed', { error: message }));
+        } finally {
+            this._manualFetching = false;
+            if (repository === this._gitService.repositoryPath) {
+                // A failed fetch still refreshes locally known refs; it never advances success time.
+                await this._reload(true, true);
+            }
+            this._post({ command: 'setFetchState', state: this._fetchState() });
+        }
+    }
+
+    private _showAllHistory(): boolean {
+        return this._allHistoryOverride ??
+            (vscode.workspace.getConfiguration('idea-git').get<string>('defaultHistoryScope', 'tracking') === 'all' && !this._branch);
+    }
+
+    /** Resolve both graph endpoints and synchronization state once for a complete payload. */
+    private async _resolveHistoryScope(details: BranchDetails, selected = this._branch): Promise<{
+        revisions?: string[]; tracking?: TrackingHistory; historyMode: 'all' | 'tracking' | 'branch';
+        scopeLabel: string; canCombineHistory: boolean;
+    }> {
+        const all = this._showAllHistory();
+        const local = trackingLocalForSelection(details.current, details.local, selected);
+        const selectedRemote = !!selected && !details.local.some(branch => branch.name === selected);
+        // A remote with no unique local tracker stays a remote-only view instead
+        // of silently pairing it with the unrelated current branch.
+        const tracking = all || !selectedRemote || local
+            ? await this._gitService.getTrackingHistory(all ? undefined : local) : undefined;
+        const combine = this._combineTracking && !!tracking;
+        const singleRef = selectedRemote ? `refs/remotes/${selected}`
+            : tracking?.revisions[0] ?? 'HEAD';
+        return {
+            tracking,
+            revisions: all ? undefined : combine ? tracking!.revisions : [singleRef],
+            historyMode: all ? 'all' : combine ? 'tracking' : 'branch',
+            scopeLabel: selected || tracking?.branch || 'HEAD',
+            canCombineHistory: all || !selectedRemote || !!local
+        };
+    }
+
     /**
      * Load what the first panel render needs while the panel is still closed.
      * VS Code creates the view lazily, so without this the first open pays for
@@ -318,10 +444,13 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         const branch = remembered && this._gitService.getBranchTipHash(remembered) ? remembered : undefined;
         this._prefetchTask = (async () => {
             try {
+                const details = await this._gitService.getBranchesWithDetails(false);
+                const scope = await this._resolveHistoryScope(details, branch);
                 await Promise.all([
                     this._gitService.getCommitGraphData({
                         limit: GraphViewProvider.PAGE_FIRST,
                         branch,
+                        revisions: scope.revisions,
                         filters: {}
                     }),
                     this._gitService.getBranchesWithDetails(false),
@@ -425,7 +554,10 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * instead of an actionable message.
      */
     async refreshRepoState(forceGitProbe: boolean = false): Promise<RepoUiState> {
+        const probeTicket = ++this._repoStateTicket;
+        const repository = this._gitService.repositoryPath;
         const state = await this._computeRepoState(forceGitProbe);
+        if (probeTicket !== this._repoStateTicket || repository !== this._gitService.repositoryPath) {return this._repoState ?? 'noRepo';}
         this._repoState = state;
         this._repoPendingFiles = state === 'emptyRepo'
             ? (await this._gitService.getWorkingTreeSummary().catch(() => undefined))?.files
@@ -433,16 +565,14 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         this._postRepoState();
 
         if (state === 'ready') {
-            // The branch remembered in view state may have been deleted since the
-            // snapshot; `git log <gone>` would fail with "unknown revision".
-            const dropped = this._dropVanishedBranch();
-            Promise.all([
-                this._loadAndDisplayBranches(dropped),
-                this._loadAndDisplayCommits()
-            ]).catch(error => {
-                vscode.window.showErrorMessage(t('view.loadDataFailed', { error: formatGitError(error) }));
-            });
-            void this._refreshDivergence();
+            // Initial display must use the same ticketed payload path as refresh.
+            // Separate branch/commit loaders used to overwrite a newer fetch result.
+            await this._reload(false, true);
+            // An initially visible WebviewView need not emit a visibility change.
+            // Start polling explicitly here, rather than waiting for a hide/show.
+            if (this._view?.visible && !this._branchCheckTimer) {this._startBranchCheck();}
+            void this._postStashes();
+            void this._postWorktrees();
             return state;
         }
 
@@ -470,9 +600,13 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         if (!rootPath || (current && repositoryKey(current) === repositoryKey(rootPath))) {return;}
 
         this._gitService.selectRepository(rootPath);
+        this._allHistoryOverride = undefined;
+        this._viewFetchTarget = undefined;
+        this._combineTracking = true;
+        this._historyRevisions = undefined;
         this._branch = undefined;
         this._lastKnownBranch = undefined;
-        this._lastKnownTip = undefined;
+        this._lastHistorySignature = undefined;
         this._lastInProgress = null;
         this._skipBranchCheckUntil = 0;
         this._revRoot = undefined;
@@ -1075,6 +1209,15 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (message: WebviewToExtMessage) => {
             switch (message.command) {
+                case 'toggleHistoryMode':
+                    this.toggleHistoryMode();
+                    break;
+                case 'showTrackingHistory':
+                    this.showTrackingHistory();
+                    break;
+                case 'showAllBranches':
+                    this.showAllBranches();
+                    break;
                 case 'selectBranch': {
                     const branch = message.branch || undefined;
                     // Rows can outlive their refs (persisted branch list, external
@@ -1089,11 +1232,15 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     }
 
                     this._branch = branch;
+                    this._allHistoryOverride = false;
                     // Clear cherry-pick resume state when switching branches
                     await this._gitService.clearCherryPickResume(this._memento);
                     await this._reload();
                     break;
                 }
+                case 'fetchAndRefresh':
+                    await this._fetchAndRefresh();
+                    break;
                 case 'refresh':
                     await this._reload(true);
                     break;
@@ -1366,12 +1513,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             // a visibility event this soon is the same show, not a second one.
             if (Date.now() - this._resolvedAt > GraphViewProvider.SHOW_RELOAD_GRACE_MS) {
                 // Hiding disposes the webview, so the payload must be re-sent.
-                // Only a moved tip forces a git log; otherwise the cached graph is
-                // replayed as-is. The tip is a filesystem read, so the check itself
-                // is free, and it also covers the watcher's debounce window where
-                // the cache has not been dropped yet.
-                const tip = await this._tipOfDisplayedRev();
-                void this._reload(!!tip && tip !== this._lastKnownTip);
+                // Include remote refs so fetches while hidden invalidate the graph.
+                // The fresh filesystem fingerprint also covers the watcher's debounce
+                // window; unchanged refs keep this path on the cached graph.
+                const signature = this._gitService.getHistorySignature();
+                void this._reload(!!signature && signature !== this._lastHistorySignature);
             }
             this._startBranchCheck();
             return;
@@ -1416,6 +1562,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         if (typeof saved.savedAt !== 'number' || Date.now() - saved.savedAt > GraphViewProvider.SESSION_RESTORE_TTL_MS) {
             void this._memento.update('idea-git.viewState', undefined);
             return undefined;
+        }
+        // Default scopes start from the current branch pair or all refs, not an
+        // unrelated remembered branch. Explicit session selections survive hiding.
+        if (vscode.workspace.getConfiguration('idea-git').get<string>('defaultHistoryScope', 'tracking') !== 'lastSelected') {
+            return { ...saved, branch: this._branch || '' };
         }
         return saved;
     }
@@ -1464,18 +1615,16 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     }
 
     private async _tickAutoFetch(): Promise<void> {
-        if (this._autoFetching || this._repoState !== 'ready') {return;}
+        if (this._autoFetching || this._manualFetching || this._repoState !== 'ready') {return;}
         const remote = this._gitService.getFetchRemote();
         if (!remote) {return;}
         this._autoFetching = true;
         try {
             await this._gitService.fetchSilent(remote);
             logger.debug(`[GitCharm] Auto-fetch from ${remote} done`);
-            // A fetch moves remote refs only: the branch tree and the behind/ahead
-            // arrows are what changed. Local history is untouched, so the middle
-            // list is deliberately not reloaded.
-            await this._refreshBranchesOnly();
-            this._refreshDivergence();
+            // Use the same ref-change check as external fetches. No new refs means
+            // no expensive log reload; a changed remote must repaint the history.
+            await this._checkBranchNow();
         } catch (error) {
             // Silent by design — offline, no credentials, or a remote that no
             // longer exists must not interrupt the user every few minutes.
@@ -1545,10 +1694,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
     private async _checkBranchNow(): Promise<void> {
         // Skip checks if within cooldown period (e.g., after rename operation)
-        if (Date.now() < this._skipBranchCheckUntil) {
+        if (this._checkingHistory || Date.now() < this._skipBranchCheckUntil) {
             return;
         }
 
+        this._checkingHistory = true;
         try {
             const currentBranch = await this._gitService.getCurrentBranch();
             if (currentBranch && currentBranch !== this._lastKnownBranch) {
@@ -1564,19 +1714,13 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 }
             }
 
-            // A moved tip means history changed outside this extension — a terminal
-            // commit, the merge commit that lands once conflicts are resolved, an
-            // amend/rebase/reset. Reloading here is what makes the list follow suit
-            // instead of waiting for a manual refresh. Both reads are file-based.
-            const tip = await this._tipOfDisplayedRev();
-            if (tip) {
-                if (this._lastKnownTip && tip !== this._lastKnownTip) {
-                    logger.info(`[GitCharm] History changed externally: ${this._lastKnownTip.slice(0, 8)} -> ${tip.slice(0, 8)}`);
-                    this._lastKnownTip = tip;
-                    void this._reload(true, true);
-                } else {
-                    this._lastKnownTip = tip;
-                }
+            // HEAD alone misses fetches, new/deleted branches and tag updates.
+            // Only refresh after the full ref fingerprint changes; this reads files
+            // without spawning git on each poll, even in linked worktrees.
+            const signature = this._gitService.getHistorySignature();
+            if (signature && signature !== this._lastHistorySignature) {
+                this._gitService.invalidateVolatile();
+                await this._reload(true, true);
             }
 
             // Same idea for the stash stack: a `git stash` in a terminal moves
@@ -1588,7 +1732,10 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 void this._postStashes();
             }
         } catch (err) {
-            // Ignore errors during branch check
+            // A failed reload keeps the old baseline so the next poll can retry.
+            logger.debug('[GitCharm] History refresh deferred:', err);
+        } finally {
+            this._checkingHistory = false;
         }
     }
 
@@ -1614,22 +1761,6 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         vscode.window.setStatusBarMessage(t('view.branchGone', { name: this._branch }), 5000);
         this._branch = undefined;
         return true;
-    }
-
-    /**
-     * Tip of whatever the commit list is showing: the selected branch when one is
-     * picked in the tree, otherwise HEAD (the "all refs" view is anchored there too).
-     */
-    private async _tipOfDisplayedRev(): Promise<string | undefined> {
-        if (this._branch) {
-            const tip = this._gitService.getBranchTipHash(this._branch);
-            if (tip) {return tip;}
-        }
-        try {
-            return (await this._gitService.getHeadHash()) || undefined;
-        } catch {
-            return undefined;
-        }
     }
 
     /**
@@ -1997,16 +2128,17 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * on it. The result is newest → oldest, i.e. exactly the order the rows sit
      * above the commit.
      */
-    private async _rootedDescendants(force: boolean): Promise<{ commits: GraphCommit[]; above: number; after: number }> {
+    private async _rootedDescendants(force: boolean, revisions?: string[]): Promise<{ commits: GraphCommit[]; above: number; after: number }> {
         const root = this._revRoot;
         if (!root) {return { commits: [], above: 0, after: 0 };}
-        const after = await this._gitService.countCommitsAfter(root.rev, root.branch);
+        const after = await this._gitService.countCommitsAfter(root.rev, root.branch, revisions);
         const want = Math.min(GraphViewProvider.REVEAL_SIDE, after);
         if (want === 0) {return { commits: [], above: 0, after };}
         const data = await this._gitService.getCommitGraphData({
             limit: want,
             skip: after - want,
             branch: root.branch,
+            revisions,
             excludeAncestorsOf: root.rev,
             force
         });
@@ -2020,7 +2152,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * a second walk and stay out of that count. The window is REVEAL_SIDE rows per
      * side when rooted, PAGE_FIRST otherwise.
      */
-    private async _firstPageRows(force: boolean): Promise<{
+    private async _firstPageRows(force: boolean, revisions?: string[]): Promise<{
         commits: GraphCommit[]; pageRows: number; pageLimit: number; above: number; after: number;
     }> {
         const rooted = this._isRootedList();
@@ -2032,12 +2164,13 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             this._gitService.getCommitGraphData({
                 limit: pageLimit,
                 branch: this._listRev(),
+                revisions: rooted ? undefined : revisions,
                 filters: this._filters,
                 force
             }),
             // Two extra spawns, and only while the list is rooted.
             rooted
-                ? this._rootedDescendants(force)
+                ? this._rootedDescendants(force, revisions)
                 : Promise.resolve({ commits: [] as GraphCommit[], above: 0, after: 0 })
         ]);
         return {
@@ -2060,15 +2193,16 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         // A selection can outlive its ref (deleted in a terminal or another
         // worktree); re-resolve it before it reaches `git log`.
         const dropped = this._dropVanishedBranch();
+        // Capture before the asynchronous query: a fetch during loading must be
+        // noticed by the next poll, not recorded as if it was already displayed.
+        const signature = this._gitService.getHistorySignature();
         const rev = this._listRev();
         logger.debug(`[GitCharm] _collect called with branch=${rev || 'all'}, force=${force}`);
         logger.debug(`[GitCharm] Filters: from=${this._filters.from}, to=${this._filters.to}, author=${this._filters.author}, text=${this._filters.text}, path=${this._filters.path}, regex=${this._filters.regex ? 1 : 0}, case=${this._filters.caseSensitive ? 1 : 0}`);
-        const [first, details] = await Promise.all([
-            this._firstPageRows(force),
-            // A vanished branch must also disappear from the tree immediately;
-            // the cached list would keep the row that produced the error.
-            this._gitService.getBranchesWithDetails(force || dropped)
-        ]);
+        const details = await this._gitService.getBranchesWithDetails(force || dropped);
+        const scope = await this._resolveHistoryScope(details);
+        const fetchTarget = await this._gitService.getBranchFetchTarget(this._branch).catch(() => undefined);
+        const first = await this._firstPageRows(force, scope.revisions);
         logger.debug(`[GitCharm] _collect got ${first.pageRows} commits for rev=${rev || 'all'} (+${first.commits.length - first.pageRows} above)`);
         const commits = first.commits;
         let headHash = '';
@@ -2081,16 +2215,16 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         // `ls-files -u` probe is reserved for the watcher path that already
         // knows an operation is running (idle probes would spawn on every load).
         const inProgress = this._gitService.detectOperationFromFiles();
-        const tip = await this._tipOfDisplayedRev();
         // A newer reload or reveal started while these queries ran; its payload
         // is the one the panel will show, so this one must not touch any state.
         if (ticket !== undefined && ticket !== this._dataTicket) {return undefined;}
         // setData carries the same field: keep the baseline in sync so the
         // auto re-check does not report a change that was just delivered.
         this._lastInProgress = inProgress ?? null;
-        // Same reason for the tip: our own commands reload here, so the poll must
-        // not treat the history it just fetched as an external change.
-        this._lastKnownTip = tip;
+        // Only a successfully collected payload advances the refresh baseline.
+        this._lastHistorySignature = signature;
+        this._historyRevisions = scope.revisions;
+        this._viewFetchTarget = fetchTarget;
         
         this._loaded = first.pageRows;
         this._hasMore = first.pageRows >= first.pageLimit;
@@ -2107,6 +2241,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         this._postFilterMirror();
         const repoPath = this._gitService.repositoryPath;
         return {
+            fetchState: this._fetchState(),
+            tracking: scope.tracking,
+            historyMode: scope.historyMode,
+            scopeLabel: scope.scopeLabel,
+            canCombineHistory: scope.canCombineHistory,
             commits,
             local: details.local.map(b => b.name),
             remote: details.remote.map(b => b.name),
@@ -2142,6 +2281,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     limit: GraphViewProvider.LOAD_WINDOW,
                     skip: this._loaded,
                     branch: this._listRev(),
+                    revisions: this._isRootedList() ? undefined : this._historyRevisions,
                     filters: this._filters
                 });
                 // The list was replaced (reveal, refresh) while this page was in
@@ -2193,6 +2333,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 limit,
                 skip: Math.max(0, remaining - limit),
                 branch: root.branch,
+                revisions: this._historyRevisions,
                 excludeAncestorsOf: root.rev
             });
             // The root or the list changed while the chunk was loading.
@@ -2315,130 +2456,6 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * Load branches in background and update webview when ready.
-     */
-    private async _loadAndDisplayBranches(force: boolean = false): Promise<void> {
-        if (!this._view || this._repoState !== 'ready') {return;}
-        
-        try {
-            // Get cached branch data (fast, no git commands if cache hit)
-            const detailsPromise = this._gitService.getBranchesWithDetails(force);
-            
-            // Get head hash in parallel (may require git command, but don't block branches)
-            const headHashPromise = this._gitService.getHeadHash().catch(() => '');
-            
-            // Update branches immediately when ready
-            const details = await detailsPromise;
-            this._postBranchList(details);
-            // Stashes and worktrees live in the same tree, so they load alongside it.
-            void this._postStashes();
-            void this._postWorktrees();
-
-            // Update head hash separately when ready (don't wait for it)
-            const headHash = await headHashPromise;
-            if (headHash) {
-                this._post({ command: 'setHeadHash', headHash });
-            }
-        } catch (error) {
-            vscode.window.showErrorMessage(t('view.loadBranchesFailed', { error: formatGitError(error) }));
-        }
-    }
-
-    /**
-     * Generate initial HTML with branches only, commits will load asynchronously.
-     */
-    private async _getInitialHtml(): Promise<string> {
-        try {
-            // Load branches, head hash, and in-progress operation in parallel for speed
-            const [details, headHash, inProgress] = await Promise.all([
-                this._gitService.getBranchesWithDetails(false),
-                this._gitService.getHeadHash().catch(() => ''),
-                this._gitService.getInProgressOperation().catch(() => undefined)
-            ]);
-            
-            const repoPath = this._gitService.repositoryPath;
-            
-            // Create payload with empty commits (will be filled later)
-            const payload: GraphPayload = {
-                commits: [],
-                local: details.local.map(b => b.name),
-                remote: details.remote.map(b => b.name),
-                currentBranch: details.current,
-                selectedBranch: this._branch || '',
-                repoName: repoPath ? path.basename(repoPath) : '',
-                hasMore: false,
-                hasMoreAbove: false,
-                headHash,
-                inProgress,
-                ...this._branchMarks(details.current)
-            };
-            
-            return this._getHtmlForWebview(payload);
-        } catch (error) {
-            // Fallback to empty state if branches fail to load
-            vscode.window.showErrorMessage(t('view.loadBranchesFailed', { error: formatGitError(error) }));
-            return this._getHtmlForWebview({
-                commits: [],
-                local: [],
-                remote: [],
-                currentBranch: '',
-                selectedBranch: '',
-                repoName: '',
-                hasMore: false,
-                hasMoreAbove: false,
-                headHash: '',
-                inProgress: undefined,
-                favorites: [],
-                recent: []
-            });
-        }
-    }
-
-    /**
-     * Load commits in background and update webview when ready.
-     */
-    private async _loadAndDisplayCommits(): Promise<void> {
-        if (!this._view || this._repoState !== 'ready') {return;}
-        
-        const startTime = Date.now();
-        logger.debug('[GitCharm] Starting commit load...');
-        
-        // Show loading indicator for commits area
-        this._postLoading('rows', true);
-        
-        try {
-            const fetchStart = Date.now();
-            const first = await this._firstPageRows(false);
-            const fetchTime = Date.now() - fetchStart;
-            logger.debug(`[GitCharm] Git fetch took ${fetchTime}ms, got ${first.commits.length} commits`);
-            
-            this._loaded = first.pageRows;
-            this._hasMore = first.pageRows >= GraphViewProvider.PAGE_FIRST;
-            this._pendingCommits = [];
-            this._streamExhausted = false;
-            this._loadedHashes = new Set(first.commits.map(c => c.hash));
-            
-            // Update webview with commits
-            const postStart = Date.now();
-            this._post({
-                command: 'setCommits',
-                commits: first.commits,
-                hasMore: this._hasMore
-            });
-            this._postFilterMirror();
-            const postTime = Date.now() - postStart;
-            
-            const totalTime = Date.now() - startTime;
-            logger.debug(`[GitCharm] Total commit load: ${totalTime}ms (fetch: ${fetchTime}ms, postMessage: ${postTime}ms)`);
-        } catch (error) {
-            if (await this._recoverMissingGit()) {return;}
-            vscode.window.showErrorMessage(t('view.loadCommitsFailed', { error: formatGitError(error) }));
-        } finally {
-            this._postLoading('rows', false);
-        }
-    }
-
-    /**
      * Refresh only the branch tree without reloading commits.
      */
     private async _refreshBranchesOnly(): Promise<void> {
@@ -2470,8 +2487,10 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     private async _refreshDivergence(): Promise<void> {
         if (!this._view || this._repoState !== 'ready') {return;}
         try {
-            // Use lightweight method that only queries divergence info (much faster than full branch details)
+            const ticket = this._dataTicket;
+            const signature = this._gitService.getHistorySignature();
             const divergenceMap = await this._gitService.getDivergenceInfo();
+            if (ticket !== this._dataTicket || signature !== this._gitService.getHistorySignature()) {return;}
             
             logger.debug('[GitCharm] Divergence info:', JSON.stringify(divergenceMap));
             
@@ -2552,6 +2571,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="resizer" id="resizer-left"></div>
         <div id="center">
+            <div id="history-sync" role="status" aria-live="polite"></div>
             <div id="cbar">
                 <div class="tb search-tb">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="6.5" cy="6.5" r="4.5"/><line x1="10" y1="10" x2="14.5" y2="14.5"/></svg>
@@ -2582,9 +2602,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 <button id="btn-reflog" title="${t('ui.reflog')}">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.2 8a6.2 6.2 0 1 1-1.8-4.4"/><path d="M14.4 1.6v2.8h-2.8"/><path d="M8 4.6V8l2.6 1.6"/></svg>
                 </button>
-                <button id="btn-refresh" title="${t('ui.refreshCommits')}">
+                <button id="btn-history-mode" type="button" aria-pressed="true" data-title="${t('ui.switchToSingle')}" aria-label="${t('ui.switchToSingle')}"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2v12M13 2v12M5 5h6m-2-2 2 2-2 2M11 11H5m2-2-2 2 2 2"/></svg></button>
+                <button id="btn-refresh" type="button" data-title="${t('history.fetchHint')}" aria-label="${t('history.fetchHint')}">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 1.5v3h-3"/></svg>
                 </button>
+                <span id="history-fetch-time" class="history-fetch-time"></span>
                 <button id="tg-graph" type="button" data-title="${t('ui.hideGraph')}">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="3.5" r="1.6"/><circle cx="4" cy="12.5" r="1.6"/><circle cx="11.5" cy="8" r="1.6"/><path d="M4 5.1v5.8M5.4 4.4l4.6 2.8M5.4 11.6l4.6-2.8"/></svg>
                 </button>

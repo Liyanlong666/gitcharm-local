@@ -1,3 +1,5 @@
+import { BranchFetchTarget, branchFetchArgs, resolveBranchFetchTarget } from './branchFetch';
+import { loadTrackingHistory, TrackingHistory } from './trackingHistory';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -124,6 +126,8 @@ export interface LogFilters {
 }
 
 export interface LogOptions {
+    /** Explicit graph roots (local + actual upstream); undefined preserves the legacy scope. */
+    revisions?: string[];
     limit?: number;
     skip?: number;
     branch?: string;
@@ -254,6 +258,7 @@ export class GitService {
     private _recentBranches = new RecentBranchReader(() => this._repositoryPath);
     private _trackInfoCache: { at: number; map: BranchTrackMap } | undefined;
     private _trackInfoPromise: Promise<BranchTrackMap> | undefined;
+    private _trackInfoGeneration = 0;
     // Persistent branch cache (workspaceState Memento, versioned payload)
     private _persistedCache: PersistedBranchCache;
     
@@ -983,10 +988,14 @@ export class GitService {
      * transfer), and with our own GIT_ASKPASS attached so HTTPS credentials and
      * SSH passphrases can be entered in the editor.
      */
-    private async _execNetwork(args: string[]): Promise<string> {
+    private async _execNetwork(args: string[], repository?: string): Promise<string> {
         const env = this._askpass ? await this._askpass.prepare() : {};
         try {
-            const out = await this.executeGitArgs(args, { env, timeoutMs: 0 });
+            // An explicit fetch target is bound before credential prompts; switching
+            // the viewed repository while authenticating must not redirect the fetch.
+            const out = repository
+                ? await runGit(args, { cwd: repository, env, timeoutMs: 0 })
+                : await this.executeGitArgs(args, { env, timeoutMs: 0 });
             this.invalidateVolatile();
             return out.trim();
         } catch (error) {
@@ -1112,6 +1121,8 @@ export class GitService {
         this._graphCache.clear();
         this._branchCache.clear();
         this._trackInfoCache = undefined;
+        this._trackInfoPromise = undefined;
+        this._trackInfoGeneration++;
         // Head hashes must be re-read: divergence checks compare them against
         // remote-tracking refs, and a stale cache hides the arrows.
         this._refsReader.invalidate();
@@ -2003,6 +2014,19 @@ export class GitService {
         return output || t('fetch.fetchedFrom', { remote });
     }
 
+    /** Resolve the displayed branch's remote target using a pinned repository. No network request. */
+    async getBranchFetchTarget(branch?: string): Promise<(BranchFetchTarget & { repository: string }) | undefined> {
+        const repository = this._repositoryPath;
+        if (!repository) {return undefined;}
+        const target = await resolveBranchFetchTarget(args => runGit(args, { cwd: repository }), branch);
+        return target ? { ...target, repository } : undefined;
+    }
+
+    /** Explicit user action: fetch the selected source into its tracking ref, without pull or checkout. */
+    async fetchBranchTarget(target: BranchFetchTarget & { repository: string }): Promise<void> {
+        await this._execNetwork(branchFetchArgs(target), target.repository);
+    }
+
     /**
      * Remotes configured for this repository, read straight from the config
      * file. Unlike remote-tracking refs this also lists a remote that was just
@@ -2258,6 +2282,7 @@ export class GitService {
         if (this._trackInfoPromise) {
             return this._trackInfoPromise;
         }
+        const generation = this._trackInfoGeneration;
         this._trackInfoPromise = this.executeGitArgs([
             'for-each-ref', 'refs/heads/', '--format=%(refname:short)|%(upstream:short)|%(upstream:track)'
         ]).then(output => {
@@ -2271,13 +2296,13 @@ export class GitService {
                 const { ahead, behind } = parseTrackInfo(parts[2]);
                 map.set(name, { upstream: upstream || undefined, ahead, behind });
             }
-            this._trackInfoCache = { at: Date.now(), map };
+            if (generation === this._trackInfoGeneration) {this._trackInfoCache = { at: Date.now(), map };}
             return map;
         }).catch(error => {
             logger.debug('[GitCharm] for-each-ref track info failed:', error);
             return new Map() as BranchTrackMap;
         }).finally(() => {
-            this._trackInfoPromise = undefined;
+            if (generation === this._trackInfoGeneration) {this._trackInfoPromise = undefined;}
         });
         return this._trackInfoPromise;
     }
@@ -2493,10 +2518,10 @@ export class GitService {
      * because `git log -n` counts from the tip and `--reverse` only flips the
      * output, never the limit.
      */
-    async countCommitsAfter(fromHash: string, topRev?: string): Promise<number> {
+    async countCommitsAfter(fromHash: string, topRev?: string, revisions?: string[]): Promise<number> {
         assertHash(fromHash);
         if (topRev) {assertRef(topRev);}
-        const output = await this.executeGitArgs(['rev-list', '--count', topRev ?? '--all', '--not', fromHash]);
+        const output = await this.executeGitArgs(['rev-list', '--count', ...(revisions?.length ? revisions.map(ref => assertRef(ref)) : [topRev ?? '--all']), '--not', fromHash]);
         const count = Number.parseInt(output.trim(), 10);
         return Number.isFinite(count) && count > 0 ? count : 0;
     }
@@ -2509,17 +2534,20 @@ export class GitService {
         const limit = opts.limit ?? 20;
         const skip = opts.skip ?? 0;
         const f = opts.filters ?? {};
-        const key = `${this._repositoryPath ?? ''}|${opts.branch ?? '__all__'}|${limit}|${skip}|${opts.excludeAncestorsOf ?? ''}|${f.text ?? ''}|${f.regex ? 'R' : '-'}${f.caseSensitive ? 'C' : '-'}|${f.author ?? ''}|${f.from ?? ''}|${f.to ?? ''}|${f.path ?? ''}`;
+        // A fetch between startup prefetch and first render must not hit the old graph,
+        // even before the filesystem watcher's invalidation debounce fires.
+        const signature = this.getHistorySignature() ?? '';
+        const key = `${this._repositoryPath ?? ''}|${opts.branch ?? '__all__'}|${limit}|${skip}|${opts.excludeAncestorsOf ?? ''}|${f.text ?? ''}|${f.regex ? 'R' : '-'}${f.caseSensitive ? 'C' : '-'}|${f.author ?? ''}|${f.from ?? ''}|${f.to ?? ''}|${f.path ?? ''}|${signature}|${JSON.stringify(opts.revisions ?? [])}`;
         if (!opts.force) {
             const hit = this._graphCache.get(key);
             if (hit) {return hit;}
         }
-        const data = await this._loadGraphData(limit, skip, opts.branch, f, opts.excludeAncestorsOf);
+        const data = await this._loadGraphData(limit, skip, opts.branch, f, opts.excludeAncestorsOf, opts.revisions);
         this._graphCache.set(key, data);
         return data;
     }
 
-    private async _loadGraphData(limit: number, skip: number, branch: string | undefined, f: LogFilters, excludeAncestorsOf?: string): Promise<GraphData> {
+    private async _loadGraphData(limit: number, skip: number, branch: string | undefined, f: LogFilters, excludeAncestorsOf?: string, revisions?: string[]): Promise<GraphData> {
         const startTime = Date.now();
         logger.debug(`[GitCharm] _loadGraphData called: limit=${limit}, skip=${skip}, branch=${branch || 'all'}, not=${excludeAncestorsOf ?? '-'}`);
         
@@ -2548,7 +2576,7 @@ export class GitService {
             } else {
                 // Positional revs are validated, not sanitised: argv spawn means no
                 // shell interpolation, and a legal ref can never start with '-'.
-                a.push(useBranch ? assertRef(useBranch) : '--all');
+                a.push(...(revisions?.length ? revisions.map(ref => assertRef(ref)) : [useBranch ? assertRef(useBranch) : '--all']));
                 if (excludeAncestorsOf) {
                     // `top --not <hash>` is that hash's descendant set; `..` cannot be
                     // used because assertRef rejects it (a real ref never contains one).
@@ -2841,6 +2869,19 @@ export class GitService {
      */
     getBranchTipHash(branch: string): string | undefined {
         return this._refsReader.readBranchRefs().get(branch);
+    }
+
+    /** Current or selected local branch and its configured upstream, without stale display caches. */
+    getTrackingHistory(branch?: string): Promise<TrackingHistory> {
+        // Bind the repository for the whole snapshot: switching folders must not mix two repos.
+        const cwd = this._repositoryPath;
+        if (!cwd) {return Promise.reject(new Error(t('ext.noGitRepo')));}
+        return loadTrackingHistory(args => runGit(args, { cwd }), branch);
+    }
+
+    /** Fresh, read-only history fingerprint shared by panel show, polling and fetch. */
+    getHistorySignature(): string | undefined {
+        return this._refsReader.readHistorySignature();
     }
 
     /**

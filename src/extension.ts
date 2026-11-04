@@ -157,6 +157,18 @@ export function activate(ctx: vscode.ExtensionContext) {
         })
     );
 
+    ctx.subscriptions.push(
+        vscode.commands.registerCommand('idea-git.showAllBranches', () => graphView.showAllBranches()),
+        vscode.commands.registerCommand('idea-git.showTrackingHistory', () => graphView.showTrackingHistory()),
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('idea-git.defaultHistoryScope')) {
+                const mode = vscode.workspace.getConfiguration('idea-git').get<string>('defaultHistoryScope', 'tracking');
+                if (mode === 'all') {graphView.showAllBranches();}
+                else if (mode === 'tracking') {graphView.showTrackingHistory();}
+            }
+        })
+    );
+
     // Git-blame annotations in the editor gutter
     const blameProvider = new BlameProvider(gitService, (hash, file) => graphView.revealCommit(hash, file));
     ctx.subscriptions.push(

@@ -1,3 +1,4 @@
+import { TrackingHistory } from '../services/trackingHistory';
 import { GraphCommit, CommitDetail, FileStat, LogFilters, StashEntry, ReflogEntry, RepositoryOption, WorktreeEntry } from '../services/gitService';
 import { FileIconPack } from '../services/fileIconTheme';
 import { DiffPreviewLine } from '../services/gitUtils';
@@ -56,10 +57,23 @@ export interface PushDialogCommit {
     date: string;
 }
 
+/** Timestamp records only successful fetches initiated by this toolbar button. */
+export interface HistoryFetchState {
+    busy: boolean;
+    target?: string;
+    lastSucceededAt?: number;
+    failed?: boolean;
+}
+
 /** Messages sent from the extension host to the webview. */
 export type ExtToWebviewMessage =
     | {
         command: 'setData';
+        fetchState?: HistoryFetchState;
+        tracking?: TrackingHistory;
+        historyMode?: 'all' | 'tracking' | 'branch';
+        scopeLabel?: string;
+        canCombineHistory?: boolean;
         commits: GraphCommit[];
         local: string[];
         remote: string[];
@@ -113,6 +127,7 @@ export type ExtToWebviewMessage =
         /** Repository the panel is showing right now, out of `repositories`. */
         currentRepository?: string;
     }
+    | { command: 'setFetchState'; state: HistoryFetchState }
     | { command: 'setCommits'; commits: GraphCommit[]; hasMore: boolean }
     | { command: 'appendCommits'; commits: GraphCommit[]; hasMore: boolean }
     | { command: 'prependCommits'; commits: GraphCommit[]; hasMoreAbove: boolean }
@@ -222,6 +237,10 @@ export type WebviewAction =
 /** Messages sent from the webview to the extension host. */
 export type WebviewToExtMessage =
     | { command: 'ready' }
+    | { command: 'showAllBranches' }
+    | { command: 'fetchAndRefresh' }
+    | { command: 'showTrackingHistory' }
+    | { command: 'toggleHistoryMode' }
     | { command: 'selectBranch'; branch: string }
     | { command: 'refresh' }
     | { command: 'refreshBranches' }

@@ -28,15 +28,15 @@ describe('applied list filter stays visible', () => {
 
     it('every commit-list paint echoes the filter it used', () => {
         const collect = source.match(/private async _collect\([\s\S]*?\n {4}\}/);
-        const background = source.match(/private async _loadAndDisplayCommits\([\s\S]*?\n {4}\}/);
-        assert.ok(collect && background, 'both list painters must exist');
+        const startup = source.match(/async refreshRepoState\([\s\S]*?\n {4}\}/);
+        assert.ok(collect && startup, 'the atomic painter and startup path must exist');
         assert.ok(
             /_postFilterMirror\(\)/.test(collect[0]),
             '_collect feeds setData, so it must echo _filters too — otherwise a search outlives its own box'
         );
         assert.ok(
-            /_postFilterMirror\(\)/.test(background[0]),
-            '_loadAndDisplayCommits runs the same filtered query and paints setCommits'
+            /await this\._reload\(/.test(startup[0]),
+            'startup must share the ticketed painter and its filter echo, not publish stale independent rows'
         );
     });
 

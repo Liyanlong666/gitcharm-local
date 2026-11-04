@@ -57,5 +57,8 @@
     "config.language.en": "English",
     "config.debug": "Enable debug logging (written to the extension host console for troubleshooting)",
     "config.autoFetchMinutes": "Fetch from the remote every N minutes while the GitCharm panel is open. 0 (the default) disables it. Silent: no credential prompt, no error toast.",
-    "config.protectedBranches": "Branch name patterns that ask for confirmation before a force-push or deletion. `*` matches any run of characters (e.g. `release/*`). The operation is never blocked outright."
+    "config.protectedBranches": "Branch name patterns that ask for confirmation before a force-push or deletion. `*` matches any run of characters (e.g. `release/*`). The operation is never blocked outright.",
+    "cmd.showAllBranches": "Show All Local and Remote Branches",
+    "config.defaultHistoryScope": "Initial history scope: current local branch with its configured upstream (tracking), all branches (all), or restore the selected branch (lastSelected).",
+    "cmd.showTrackingHistory": "Show current local branch and upstream"
 }

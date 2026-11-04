@@ -128,6 +128,67 @@ function highlightItem(index) {
     });
 }
 
+/** Show this button's last successful fetch, not FETCH_HEAD mtime (which may record failure/other refs). */
+function renderHistoryFetch() {
+    var button = document.getElementById('btn-refresh');
+    var time = document.getElementById('history-fetch-time');
+    if (!button || !time) return;
+    var fetch = state.fetchState || {};
+    button.disabled = !!fetch.busy;
+    button.classList.toggle('fetching', !!fetch.busy);
+    button.setAttribute('aria-busy', String(!!fetch.busy));
+    var hint = fetch.target ? T('history.fetchTargetHint', { branch: fetch.target }) : T('history.fetchLocalOnly');
+    var stamp = '';
+    if (typeof fetch.lastSucceededAt === 'number') {
+        var date = new Date(fetch.lastSucceededAt);
+        stamp = date.toDateString() === new Date().toDateString()
+            ? date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+            : date.toLocaleDateString();
+        hint += '\n' + T('history.fetchLastSuccess', { time: date.toLocaleString() });
+    } else {
+        hint += '\n' + T('history.fetchNever');
+    }
+    if (fetch.failed) hint += '\n' + T('history.fetchFailed');
+    button.setAttribute('data-title', hint);
+    button.setAttribute('aria-label', fetch.busy ? T('fetch.fetching') : hint);
+    time.textContent = fetch.busy ? T('fetch.fetching') : fetch.failed ? T('history.fetchRetry') : stamp ? 'Fetch ' + stamp : 'Fetch';
+    time.setAttribute('data-title', hint);
+}
+
+/** Counts come from the same immutable local/upstream snapshot as the commit list. */
+function renderHistoryStatus() {
+    var el = document.getElementById('history-sync');
+    if (!el) return;
+    var info = state.tracking;
+    if (!info && !state.scopeLabel) { el.textContent = ''; el.style.display = 'none'; return; }
+    el.style.display = 'flex';
+    var mode = state.historyMode || 'tracking';
+    var label = T('history.scope.' + mode);
+    var pair = mode === 'branch' ? state.scopeLabel : ((info && info.branch) || T('history.detachedLabel'));
+    if (mode !== 'branch' && info && info.upstream) pair += ' ↔ ' + info.upstream;
+    var status = info ? T('history.status.' + info.status, { ahead: info.ahead, behind: info.behind }) : T('history.noLocalTracker');
+    if (info && mode === 'branch' && state.scopeLabel === info.upstream) {
+        status = T('history.localSyncFor', { branch: info.branch }) + ' ' + status;
+    }
+    var toggle = document.getElementById('btn-history-mode');
+    if (toggle) {
+        var combined = mode === 'tracking';
+        // Inline SVG matches the neighbouring refresh button and needs no icon font.
+        var shape = mode === 'all' ? '<path d="M3 2v12M8 2v12M13 2v12"/>'
+            : combined ? '<path d="M3 2v12M13 2v12M5 5h6m-2-2 2 2-2 2M11 11H5m2-2-2 2 2 2"/>'
+            : '<path d="M5 2v12M5 10c0-4 6-3 6-8M9 4l2-2 2 2"/>';
+        toggle.innerHTML = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + shape + '</svg>';
+        var hint = T(state.canCombineHistory === false ? 'history.noLocalTracker' : combined ? 'ui.switchToSingle' : 'ui.switchToCombined');
+        toggle.setAttribute('aria-pressed', String(combined));
+        toggle.setAttribute('aria-label', hint);
+        toggle.setAttribute('data-title', T(mode === 'all' ? 'history.scope.all' : combined ? 'ui.historyCombined' : 'ui.historySingle') + '\n' + hint);
+        toggle.disabled = state.canCombineHistory === false;
+    }
+    el.innerHTML = '<span class="history-scope">' + esc(label) + '</span>' +
+        '<span class="history-pair" data-title="' + esc(pair) + '">' + esc(pair) + '</span>' +
+        '<span class="history-state ' + (info && info.status === 'synced' ? 'synced' : 'pending') + '">' + esc(status) + '</span>';
+}
+
 function closeAuthorDropdown() {
     var dropdown = document.getElementById('author-dropdown');
     if (dropdown) {
@@ -175,6 +236,11 @@ var state = {
     stashes: [],
     worktrees: [],
     divergence: {},
+    tracking: null,
+    historyMode: 'tracking',
+    scopeLabel: '',
+    canCombineHistory: true,
+    fetchState: { busy: false },
     detailVisible: false,
     current: INITIAL.currentBranch || '',
     selectedBranch: INITIAL.selectedBranch || '',
@@ -608,11 +674,11 @@ function renderTree() {
         var tooltipText = n; // Always show full branch name
         if (d) {
             if (d.behind > 0) {
-                arrows += '<span class="barr down" data-title="' + esc(T('w.divergeBehind', { n: d.behind })) + '">&#8595;</span>';
+                arrows += '<span class="barr down" data-title="' + esc(T('w.divergeBehind', { n: d.behind })) + '">&#8595; ' + d.behind + '</span>';
                 tooltipText += '\n' + T('w.divergeBehind', { n: d.behind });
             }
             if (d.ahead > 0) {
-                arrows += '<span class="barr up" data-title="' + esc(T('w.divergeAhead', { n: d.ahead })) + '">&#8593;</span>';
+                arrows += '<span class="barr up" data-title="' + esc(T('w.divergeAhead', { n: d.ahead })) + '">&#8593; ' + d.ahead + '</span>';
                 tooltipText += '\n' + T('w.divergeAhead', { n: d.ahead });
             }
         }
@@ -2109,8 +2175,16 @@ document.getElementById('f-author').addEventListener('blur', function() {
 // reach (same reason the author box got its own dropdown).
 initDateRange();
 initFilterOverflow();
+// Return from a deliberate branch filter to the combined local/remote history.
+document.getElementById('btn-history-mode').addEventListener('click', function () {
+    vscode.postMessage({ command: 'toggleHistoryMode' });
+});
+
 document.getElementById('btn-refresh').addEventListener('click', function () {
-    vscode.postMessage({ command: 'refresh' });
+    if (state.fetchState && state.fetchState.busy) return;
+    state.fetchState = Object.assign({}, state.fetchState, { busy: true });
+    renderHistoryFetch();
+    vscode.postMessage({ command: 'fetchAndRefresh' });
 });
 document.getElementById('btn-reflog').addEventListener('click', function () {
     // Same branch as the commit list above: the reflog answers "what moved
@@ -3379,7 +3453,10 @@ document.addEventListener('keydown', function (e) {
 
 window.addEventListener('message', function (ev) {
     var m = ev.data;
-    if (m.command === 'setFileIconTheme') {
+    if (m.command === 'setFetchState') {
+        state.fetchState = m.state || { busy: false };
+        renderHistoryFetch();
+    } else if (m.command === 'setFileIconTheme') {
         state.iconPack = m.pack || null;
         applyIconFont(state.iconPack);
         renderDetail();
@@ -3391,6 +3468,9 @@ window.addEventListener('message', function (ev) {
         state.currentRepository = m.currentRepository || '';
         renderRepoSwitcher();
         if (state.repoState !== 'ready') {
+            state.tracking = null;
+            state.scopeLabel = '';
+            renderHistoryStatus();
             // No data will ever arrive to clear the startup skeleton
             loadState.initialLoad = false;
             hideInitialLoading();
@@ -3404,6 +3484,16 @@ window.addEventListener('message', function (ev) {
         state.remote = m.remote || [];
         state.current = m.currentBranch || '';
         state.selectedBranch = m.selectedBranch || '';
+        state.fetchState = m.fetchState || { busy: false };
+        renderHistoryFetch();
+        state.tracking = m.tracking || null;
+        state.historyMode = m.historyMode || 'tracking';
+        state.scopeLabel = m.scopeLabel || '';
+        state.canCombineHistory = m.canCombineHistory !== false;
+        if (state.tracking && state.tracking.branch) {
+            state.divergence[state.tracking.branch] = { ahead: state.tracking.ahead, behind: state.tracking.behind };
+        }
+        renderHistoryStatus();
         if (m.repoName) state.repoName = m.repoName;
         state.hasMore = !!m.hasMore;
         state.hasMoreAbove = !!m.hasMoreAbove;

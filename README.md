@@ -1,7 +1,37 @@
-> Local build 0.2.1: defaults to the current local branch **and its configured upstream**, with visible ahead/behind/sync status. Fetch refreshes the paired history; the toolbar icon toggles Single branch / Local + remote and retains All branches in the branch tree and Command Palette. No automatic pull, merge or checkout is added.
->
-> 本地修订版 0.2.1：默认同图显示当前本地分支与其实际跟踪分支，明确显示已同步、领先、落后、分叉及数量。fetch 后自动刷新；工具栏图标按钮可切换“单分支 / 本地＋远程”，全部分支可从分支树或命令面板进入。刷新按钮执行目标分支 Fetch＋刷新，并显示本按钮上次成功获取时间。统计以最近 fetch 的结果为准。不新增自动 pull、合并或切换分支。
+# GitCharm Local
 
+个人维护的 GitCharm 定制版，基于 [Git0gui/gitcharm](https://github.com/Git0gui/gitcharm)，沿用 MIT 许可证和原作者版权声明。当前版本 **0.2.2**。本仓库不是上游官方发行渠道。
+
+A community customization of [GitCharm](https://github.com/Git0gui/gitcharm), retaining its MIT license and copyright notice. Version **0.2.2**; this is not the upstream Marketplace release.
+
+## 定制功能
+
+- **面板内比较**：工具栏「比较分支…」选择源与目标；右键另一条分支时，以当前分支为源。
+- **PR 改动**：比较共同祖先到源分支；**版本差异**：直接比较目标到源版本。两种模式都不包含未提交内容，不自动 Fetch。
+- 明确显示比较基线、源/目标独有提交数、文件数及增删行数。比较期间固定提交号，点击刷新才重新读取分支端点。
+- 在文件树中单击预览，双击打开左右差异；支持重命名前后的路径。读取失败明确显示错误，不伪装为“没有差异”。
+- 选中两条提交后右键「比较这两个版本」，与原有“汇总选中提交”口径分别提供。
+- 「固定」比较后，浏览其他提交不会覆盖它；关闭比较恢复提交详情。固定仅覆盖当前会话，不是跨重启保存比较组合。
+- 详情可放在**右侧或下方**，支持拖动尺寸并记住布局。
+- 保留本地＋实际跟踪分支组合视图、同步状态、单分支切换、全部分支入口，以及只 Fetch 不 pull 的刷新按钮和成功时间。
+
+## 安装
+
+从本仓库 [Releases](https://github.com/Liyanlong666/gitcharm-local/releases) 下载 `.vsix`，在 VS Code 中运行 **Extensions: Install from VSIX…**，安装后执行 **Developer: Reload Window**。
+
+本版沿用 `liugui.git-charm` 扩展 ID，安装 VSIX 会替换已安装的上游 GitCharm。为保留定制行为，请避免将它手动更新成市场版。源码构建：
+
+```sh
+npm ci
+npm run compile
+npm run lint
+npm test
+npm run package
+```
+
+本仓库仅发布源码和 VSIX，不向 VS Code Marketplace 发布。下面保留上游功能介绍；其中 Marketplace 链接指向上游版本。
+
+---
 
 <h1 align="center">
   <img src="https://cdn.jsdelivr.net/gh/Git0gui/gitcharm@main/resources/icon.png" width="96" height="96" alt="GitCharm" />

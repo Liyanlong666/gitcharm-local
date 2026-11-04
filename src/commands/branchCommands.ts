@@ -526,32 +526,26 @@ export function registerBranchCommands(
             }
         }),
 
-        vscode.commands.registerCommand('idea-git.compareBranch', async (branchNode: any) => {
-            const branchName = getBranchName(branchNode);
-            if (!branchName) {
-                vscode.window.showErrorMessage(t('common.noBranchSelected'));
-                return;
-            }
+        vscode.commands.registerCommand('idea-git.compareReferences', async () => {
+            await graphView.pickComparison();
+        }),
 
+        vscode.commands.registerCommand('idea-git.compareBranch', async (branchNode: unknown) => {
+            const target = getBranchName(branchNode);
+            if (!target) {return;}
+            const repository = gitService.repositoryPath;
             try {
-                const currentBranch = await gitService.getCurrentBranch();
-                if (branchName === currentBranch) {
-                    vscode.window.showInformationMessage(t('branch.isCurrent', { name: branchName }));
+                const details = await gitService.getBranchesWithDetails();
+                if (repository !== gitService.repositoryPath) {return;}
+                const source = details.current;
+                if (source === target) {
+                    await graphView.pickComparison();
                     return;
                 }
-                const [commits, diffFiles] = await Promise.all([
-                    gitService.compareBranches(branchName),
-                    gitService.getDiffFilesBetweenRefs(currentBranch, branchName)
-                ]);
-                if (commits.length === 0 && diffFiles.length === 0) {
-                    vscode.window.showInformationMessage(t('branch.noDiffWithCurrent', { name: branchName }));
-                    return;
-                }
-                graphView.showCompareDialog(
-                    branchName,
-                    currentBranch,
-                    commits.map(c => ({ hash: c.hash, shortHash: c.shortHash, message: c.message, author: c.author, date: c.date }))
-                );
+                // Qualify refs so a same-named tag cannot silently become a branch endpoint.
+                const targetRef = details.local.some(branch => branch.name === target)
+                    ? `refs/heads/${target}` : `refs/remotes/${target}`;
+                await graphView.openComparison(source ? `refs/heads/${source}` : 'HEAD', targetRef, 'pr');
             } catch (error) {
                 vscode.window.showErrorMessage(t('branch.compareFailed', { error: formatGitError(error) }));
             }

@@ -7,9 +7,11 @@
 (function () {
     var sendQueue = [];
     var ready = false;
+    var comparison = null;
 
     function send(msg) {
         if (!ready) { sendQueue.push(msg); return; }
+        if (msg.command === 'comparisonState') {comparison = msg.comparison;}
         window.dispatchEvent(new MessageEvent('message', { data: msg }));
     }
 
@@ -47,10 +49,19 @@
                             files: P.multiFiles || []
                         });
                     }
-                } else if (msg.command === 'getCompareAllFiles') {
-                    send({ command: 'compareFilesResponse', hash: '__all__', files: P.pushFiles['__all__'] });
-                } else if (msg.command === 'getCompareFiles') {
-                    send({ command: 'compareFilesResponse', hash: msg.hash, files: P.pushFiles[msg.hash] || [] });
+                } else if (msg.command === 'updateComparison' && comparison) {
+                    var next = JSON.parse(JSON.stringify(comparison));
+                    next.id++;
+                    next.mode = next.snapshot.mode = msg.mode;
+                    next.snapshot.baseHash = msg.mode === 'pr' ? 'c'.repeat(40) : next.snapshot.targetHash;
+                    if (msg.swap) {
+                        var source = next.source; next.source = next.target; next.target = source;
+                    }
+                    send({ command: 'comparisonState', comparison: next });
+                } else if (msg.command === 'closeComparison') {
+                    send({ command: 'comparisonState' });
+                } else if (msg.command === 'previewComparisonFile') {
+                    send(Object.assign({ command: 'comparisonPreview', id: msg.id, requestId: msg.requestId, path: msg.path }, P.previews.default));
                 } else if (msg.command === 'selectStash') {
                     send({ command: 'setStashDetail', index: msg.index, files: P.stashFiles[msg.index] || [] });
                 } else if (msg.command === 'saveViewState') {

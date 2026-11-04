@@ -285,55 +285,8 @@
                 { do: 'menu', sel: '.bitem[data-branch="feat/system-proxy-hint"]' }
             ]
         }),
-        /**
-         * Compare-with-current-branch: the dialog that has to leave the
-         * changed-file pane enough room to pick a file out of a real changeset.
-         */
-        compareDialog: Object.assign({}, base, {
-            steps: [
-                {
-                    msg: {
-                        command: 'showCompareDialog',
-                        branchName: 'origin/main',
-                        currentBranch: 'main',
-                        commits: commits.slice(0, 12)
-                    }
-                }
-            ]
-        }),
-        /** Same dialog with the info pane folded away: the files pane takes it over. */
-        compareDialogCollapsed: Object.assign({}, base, {
-            steps: [
-                {
-                    msg: {
-                        command: 'showCompareDialog',
-                        branchName: 'origin/main',
-                        currentBranch: 'main',
-                        commits: commits.slice(0, 12)
-                    }
-                },
-                { do: 'click', sel: '.push-detail-toggle' }
-            ]
-        }),
-        /**
-         * Folded after the file/detail split had been dragged: the drag leaves a
-         * fixed inline flex on the files pane, which used to strand the freed
-         * height as dead space under the folder.
-         */
-        compareDialogCollapsedSplit: Object.assign({}, base, {
-            steps: [
-                {
-                    msg: {
-                        command: 'showCompareDialog',
-                        branchName: 'origin/main',
-                        currentBranch: 'main',
-                        commits: commits.slice(0, 12)
-                    }
-                },
-                { do: 'style', sel: '.push-files-section', prop: 'flex', value: '0 1 160px' },
-                { do: 'click', sel: '.push-detail-toggle' }
-            ]
-        }),
+        comparePanel: Object.assign({}, base, {"steps": [{"msg": {"command": "comparisonState", "comparison": {"id": 1, "source": "feat/panel-compare", "target": "origin/main", "mode": "pr", "snapshot": {"source": "feat/panel-compare", "target": "origin/main", "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "targetHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "baseHash": "cccccccccccccccccccccccccccccccccccccccc", "mode": "pr", "ahead": 4, "behind": 2, "added": 62, "deleted": 11, "files": [{"status": "A", "path": "src/services/comparison.ts", "added": 42, "deleted": 0}, {"status": "M", "path": "src/views/graphView.ts", "added": 15, "deleted": 8}, {"status": "M", "path": "media/webview.js", "added": 5, "deleted": 3}]}}}}, {"do": "click", "sel": "#cp-files .file"}]}),
+        compareBottom: Object.assign({}, base, {"steps": [{"msg": {"command": "comparisonState", "comparison": {"id": 1, "source": "feat/panel-compare", "target": "origin/main", "mode": "pr", "snapshot": {"source": "feat/panel-compare", "target": "origin/main", "sourceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "targetHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "baseHash": "cccccccccccccccccccccccccccccccccccccccc", "mode": "pr", "ahead": 4, "behind": 2, "added": 62, "deleted": 11, "files": [{"status": "A", "path": "src/services/comparison.ts", "added": 42, "deleted": 0}, {"status": "M", "path": "src/views/graphView.ts", "added": 15, "deleted": 8}, {"status": "M", "path": "media/webview.js", "added": 5, "deleted": 3}]}}}}, {"do": "click", "sel": "#cp-files .file"}, {"do": "click", "sel": "#detail-layout"}]}),
         /**
          * File context menu for a path that is gone from the working tree: "jump
          * to source" must be greyed out instead of opening a historical blob.

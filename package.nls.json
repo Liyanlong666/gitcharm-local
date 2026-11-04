@@ -67,5 +67,6 @@
     "config.protectedBranches": "Branch name patterns that ask for confirmation before a force-push or deletion. `*` matches any run of characters (e.g. `release/*`). The operation is never blocked outright.",
     "cmd.showAllBranches": "Show All Local and Remote Branches",
     "config.defaultHistoryScope": "Initial history scope: current local branch with its configured upstream (tracking), all branches (all), or restore the selected branch (lastSelected).",
-    "cmd.showTrackingHistory": "Show current local branch and upstream"
+    "cmd.showTrackingHistory": "Show current local branch and upstream",
+    "cmd.compareReferences": "Compare Branches…"
 }

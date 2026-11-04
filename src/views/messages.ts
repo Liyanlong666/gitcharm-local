@@ -1,4 +1,5 @@
 import { TrackingHistory } from '../services/trackingHistory';
+import { ComparisonMode, ComparisonSnapshot } from '../services/comparison';
 import { GraphCommit, CommitDetail, FileStat, LogFilters, StashEntry, ReflogEntry, RepositoryOption, WorktreeEntry } from '../services/gitService';
 import { FileIconPack } from '../services/fileIconTheme';
 import { DiffPreviewLine } from '../services/gitUtils';
@@ -33,6 +34,8 @@ export interface PersistedViewState {
     selectedHash?: string;
     scrollTop?: number;
     detailVisible?: boolean;
+    /** Right is the default; bottom keeps the graph above the same detail content. */
+    detailLayout?: 'right' | 'bottom';
     collapsed?: Record<string, boolean>;
     collapsedSec?: Record<string, boolean>;
     expandedFolder?: Record<string, boolean>;
@@ -64,6 +67,16 @@ export interface HistoryFetchState {
     target?: string;
     lastSucceededAt?: number;
     failed?: boolean;
+}
+
+/** Host-owned state. A new id invalidates every outstanding file/preview request. */
+export interface ComparisonPanelState {
+    id: number;
+    source: string;
+    target: string;
+    mode: ComparisonMode;
+    snapshot?: ComparisonSnapshot;
+    error?: string;
 }
 
 /**
@@ -238,13 +251,8 @@ export type ExtToWebviewMessage =
         scope: string;
         entries: ReflogEntry[];
     }
-    | {
-        command: 'showCompareDialog';
-        branchName: string;
-        currentBranch: string;
-        commits: PushDialogCommit[];
-    }
-    | { command: 'compareFilesResponse'; hash: string; files: Array<{ path: string; status: string }> }
+    | { command: 'comparisonState'; comparison?: ComparisonPanelState }
+    | { command: 'comparisonPreview'; id: number; requestId: number; path: string; lines?: DiffPreviewLine[]; binary?: boolean; truncated?: boolean; error?: string }
     | { command: 'addBranchOptimistic'; branch: string; isCurrent: boolean }
     | { command: 'removeBranchOptimistic'; branch: string }
     | { command: 'renameBranchOptimistic'; oldName: string; newName: string }
@@ -258,7 +266,7 @@ export type ExtToWebviewMessage =
 export type WebviewAction =
     | 'continueOperation' | 'abortOperation'
     | 'checkout' | 'push' | 'pull' | 'fetch' | 'merge' | 'rebase' | 'update'
-    | 'commit' | 'rename' | 'deleteBranch' | 'newBranchFrom' | 'compareBranch'
+    | 'commit' | 'rename' | 'deleteBranch' | 'newBranchFrom' | 'compareBranch' | 'compareRevisions'
     | 'showDiff' | 'cherryPick' | 'reset' | 'dropCommit' | 'squashCommits' | 'interactiveRebase' | 'editMessage'
     | 'revert' | 'amend' | 'openRemoteCommit' | 'openRemoteBranch'
     | 'newTag' | 'deleteTag' | 'deleteTags' | 'pushTag' | 'pushAllTags' | 'pickPushTags' | 'remoteTags'
@@ -329,10 +337,11 @@ export type WebviewToExtMessage =
     | { command: 'pushDialogFileDiff'; hash: string; path: string }
     | { command: 'getCommitFilesForPush'; hash: string }
     | { command: 'getPushAllFiles' }
-    | { command: 'getCompareFiles'; hash: string }
-    | { command: 'getCompareAllFiles' }
-    | { command: 'compareFileDiff'; hash: string; path: string }
-    | { command: 'compareDialogClosed' };
+    | { command: 'pickComparison' }
+    | { command: 'updateComparison'; id: number; mode: ComparisonMode; swap?: boolean }
+    | { command: 'closeComparison' }
+    | { command: 'openComparisonFile'; id: number; path: string }
+    | { command: 'previewComparisonFile'; id: number; requestId: number; path: string };
 
 /**
  * Line history panel protocol (the editor tab opened by Alt+H).

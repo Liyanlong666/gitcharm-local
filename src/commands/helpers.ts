@@ -7,12 +7,13 @@ import { t } from '../i18n';
 
 /**
  * Build a virtual-document URI whose content is the file blob at a given git ref.
+ * Supplying repository keeps the document bound to that root across graph navigation.
  */
-export function gitBlobUri(ref: string, filePath: string): vscode.Uri {
+export function gitBlobUri(ref: string, filePath: string, repository?: string): vscode.Uri {
     return vscode.Uri.from({
         scheme: 'idea-git-diff',
         path: '/' + filePath,
-        query: 'ref=' + encodeURIComponent(ref)
+        query: 'ref=' + encodeURIComponent(ref) + (repository ? '&repo=' + encodeURIComponent(repository) : '')
     });
 }
 
@@ -27,14 +28,20 @@ export function gitBlobUri(ref: string, filePath: string): vscode.Uri {
  * inline, so the two surfaces refuse for the same reason.
  *
  * Returns false when nothing was opened because the change is binary.
+ * For a rename, basePath is the old name in the left revision; filePath is
+ * the new name in the right revision. Other callers use the same path on both.
  */
 export async function openEditorDiff(
     gitService: GitService,
     baseRef: string,
     targetRef: string,
     filePath: string,
-    title: string
+    title: string,
+    basePath: string = filePath
 ): Promise<boolean> {
+    // Both documents must keep reading the original repository after navigation
+    // switches the graph to another repository in the same workspace.
+    const repository = gitService.repositoryPath;
     // Not being able to classify the change is no reason to withhold the diff the
     // user asked for: this gate exists to stop a hung editor, not to gate normal work.
     const binary = await gitService.isBinaryChange(baseRef, targetRef, filePath).catch(() => false);
@@ -44,8 +51,8 @@ export async function openEditorDiff(
     }
     await vscode.commands.executeCommand(
         'vscode.diff',
-        gitBlobUri(baseRef, filePath),
-        gitBlobUri(targetRef, filePath),
+        gitBlobUri(baseRef, basePath, repository),
+        gitBlobUri(targetRef, filePath, repository),
         title
     );
     return true;

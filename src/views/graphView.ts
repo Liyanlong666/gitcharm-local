@@ -1,3 +1,4 @@
+import { ComparisonMode } from '../services/comparison';
 import { BranchFetchTarget } from '../services/branchFetch';
 import { TrackingHistory, trackingLocalForSelection } from '../services/trackingHistory';
 import * as vscode from 'vscode';
@@ -5,7 +6,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { GitService, GraphCommit, FileStat, LogFilters, ReflogEntry, PushPreview, BranchDetails } from '../services/gitService';
-import { ExtToWebviewMessage, HistoryFetchState, OperationKind, PersistedViewState, RepoUiState, TagSyncDecision, TagSyncRow, WebviewToExtMessage } from './messages';
+import { ComparisonPanelState, ExtToWebviewMessage, HistoryFetchState, OperationKind, PersistedViewState, RepoUiState, TagSyncDecision, TagSyncRow, WebviewToExtMessage } from './messages';
 import { logger } from '../services/logger';
 import { getFileIconPack, iconThemeResourceRoot, invalidateFileIconCache } from '../services/fileIcons';
 import { resolveGitDir } from '../services/gitPaths';
@@ -51,7 +52,7 @@ const BRANCH_POLL_MS = 2000;
 const SCREEN_COMMANDS: ReadonlySet<ExtToWebviewMessage['command']> = new Set([
     'setData', 'setBranches', 'setStashes', 'setWorktrees', 'setRepoState', 'setFavorites',
     'setCommits', 'setHeadHash', 'setInProgress', 'setDivergence', 'setCurrentBranch',
-    'setDetail', 'setFileIconTheme', 'syncFilters', 'setFetchState'
+    'setDetail', 'setFileIconTheme', 'syncFilters', 'setFetchState', 'comparisonState'
 ]);
 
 export class GraphViewProvider implements vscode.WebviewViewProvider {
@@ -144,6 +145,9 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     private _viewFetchTarget: (BranchFetchTarget & { repository: string }) | undefined;
     /** Immutable roots for subsequent pages of the displayed snapshot. */
     private _historyRevisions: string[] | undefined;
+    private _comparison: ComparisonPanelState | undefined;
+    private _comparisonRepository: string | undefined;
+    private _comparisonSequence = 0;
     // Contents of refs/stash ('' when the repo has none); a change means a stash
     // was created, applied or dropped outside this extension.
     private _lastStashSignature: string | undefined;
@@ -612,6 +616,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     async refreshRepoState(forceGitProbe: boolean = false): Promise<RepoUiState> {
         const probeTicket = ++this._repoStateTicket;
         const repository = this._gitService.repositoryPath;
+        if (this._comparison && this._comparisonRepository !== repository) {this._closeComparison();}
         const state = await this._computeRepoState(forceGitProbe);
         if (probeTicket !== this._repoStateTicket || repository !== this._gitService.repositoryPath) {return this._repoState ?? 'noRepo';}
         this._repoState = state;
@@ -655,6 +660,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         const current = this._gitService.repositoryPath;
         if (!rootPath || (current && repositoryKey(current) === repositoryKey(rootPath))) {return;}
 
+        this._closeComparison();
         this._gitService.selectRepository(rootPath);
         this._allHistoryOverride = undefined;
         this._viewFetchTarget = undefined;
@@ -1034,65 +1040,91 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         this._post({ command: 'showFileHistory', filePath, history });
     }
 
+    /** Choose explicit source/target refs without switching branches or fetching. */
+    async pickComparison(): Promise<void> {
+        const repository = this._gitService.repositoryPath;
+        try {
+            const details = await this._gitService.getBranchesWithDetails();
+            const items = [
+                ...details.local.map(branch => ({ label: branch.name, ref: `refs/heads/${branch.name}`, description: t('common.local') })),
+                ...details.remote.map(branch => ({ label: branch.name, ref: `refs/remotes/${branch.name}`, description: t('common.remote') }))
+            ];
+            const source = await vscode.window.showQuickPick(items, {
+                title: t('comparison.chooseSource'), placeHolder: t('comparison.sourceHint'),
+                ignoreFocusOut: true
+            });
+            if (!source || repository !== this._gitService.repositoryPath) {return;}
+            const target = await vscode.window.showQuickPick(items.filter(item => item.ref !== source.ref), {
+                title: t('comparison.chooseTarget'), placeHolder: t('comparison.targetHint'),
+                ignoreFocusOut: true
+            });
+            if (!target || repository !== this._gitService.repositoryPath) {return;}
+            await this.openComparison(source.ref, target.ref, 'pr');
+        } catch (error) {
+            vscode.window.showErrorMessage(t('branch.compareFailed', { error: formatGitError(error) }));
+        }
+    }
+
     /**
-     * Show a read-only branch compare dialog: commits the selected branch has
-     * that the current branch lacks, per-commit files, and an aggregate
-     * "全部差异" row (tip-to-tip diff).
+     * Open the embedded review surface. Failed reads stay visible as errors;
+     * a newer selection or repository switch invalidates the pending response.
      */
-    showCompareDialog(
-        branchName: string,
-        currentBranch: string,
-        commits: Array<{ hash: string; shortHash: string; message: string; author: string; date: string }>
-    ): void {
-        const view = this._view;
-        if (!view) {return;}
-        const subscriptions: vscode.Disposable[] = [];
-        let closed = false;
-        const close = () => {
-            if (closed) {return;}
-            closed = true;
-            while (subscriptions.length > 0) {subscriptions.pop()?.dispose();}
-        };
-        subscriptions.push(view.webview.onDidReceiveMessage((msg: WebviewToExtMessage) => {
-            if (msg.command === 'compareDialogClosed') {
-                close();
-            } else if (msg.command === 'getCompareFiles') {
-                void (async () => {
-                    try {
-                        const files = await this._gitService.getCommitFilesWithStats(msg.hash, false);
-                        this._post({
-                            command: 'compareFilesResponse',
-                            hash: msg.hash,
-                            files: files.map(f => ({ path: f.path, status: f.status || '' }))
-                        });
-                    } catch {
-                        this._post({ command: 'compareFilesResponse', hash: msg.hash, files: [] });
-                    }
-                })();
-            } else if (msg.command === 'getCompareAllFiles') {
-                void (async () => {
-                    try {
-                        const files = await this._gitService.getDiffFilesBetweenRefs(currentBranch, branchName);
-                        this._post({ command: 'compareFilesResponse', hash: ALL_COMMITS_ROW, files });
-                    } catch {
-                        this._post({ command: 'compareFilesResponse', hash: ALL_COMMITS_ROW, files: [] });
-                    }
-                })();
-            } else if (msg.command === 'compareFileDiff') {
-                if (msg.hash === ALL_COMMITS_ROW) {
-                    void this._openRefFileDiff(currentBranch, branchName, msg.path);
-                } else {
-                    void this._openFileDiff(msg.hash, msg.path);
-                }
+    async openComparison(source: string, target: string, mode: ComparisonMode): Promise<void> {
+        const repository = this._gitService.repositoryPath;
+        if (!repository) {return;}
+        const comparison: ComparisonPanelState = { id: ++this._comparisonSequence, source, target, mode };
+        this._comparison = comparison;
+        this._comparisonRepository = repository;
+        void vscode.commands.executeCommand('idea-git.mainView.focus');
+        this._post({ command: 'comparisonState', comparison });
+        try {
+            const snapshot = await this._gitService.getComparison(source, target, mode);
+            if (this._comparison !== comparison || repository !== this._gitService.repositoryPath) {return;}
+            comparison.snapshot = snapshot;
+        } catch (error) {
+            if (this._comparison !== comparison || repository !== this._gitService.repositoryPath) {return;}
+            comparison.error = formatGitError(error);
+        }
+        this._post({ command: 'comparisonState', comparison });
+    }
+
+    /** Forget a review before another repository can reuse its labels or paths. */
+    private _closeComparison(): void {
+        this._comparison = undefined;
+        this._comparisonRepository = undefined;
+        this._post({ command: 'comparisonState' });
+    }
+
+    /** Validate a file against the frozen host snapshot, never against webview refs. */
+    private async _comparisonFile(message: Extract<WebviewToExtMessage, { command: 'openComparisonFile' | 'previewComparisonFile' }>): Promise<void> {
+        const comparison = this._comparison;
+        const repository = this._comparisonRepository;
+        const snapshot = comparison?.snapshot;
+        if (!snapshot || comparison?.id !== message.id || repository !== this._gitService.repositoryPath) {return;}
+        const file = snapshot.files.find(item => item.path === message.path);
+        if (!file) {return;}
+        try {
+            if (message.command === 'openComparisonFile') {
+                await openEditorDiff(this._gitService, snapshot.baseHash, snapshot.sourceHash, file.path,
+                    `${file.path} (${snapshot.baseHash.slice(0, 8)} ↔ ${snapshot.sourceHash.slice(0, 8)})`, file.fromPath);
+            } else {
+                // A rename needs both paths in Git's pathspec so it remains a
+                // rename in the preview rather than an unrelated added file.
+                const preview = await this._gitService.getFileDiffPreview(
+                    snapshot.baseHash, snapshot.sourceHash, file.path, undefined, file.fromPath);
+                if (comparison !== this._comparison || repository !== this._gitService.repositoryPath) {return;}
+                this._post({ command: 'comparisonPreview', id: message.id, requestId: message.requestId,
+                    path: file.path, lines: preview.lines, binary: preview.binary, truncated: preview.truncated });
             }
-        }));
-        // Same lifetime as the dialog itself: closing it, hiding the panel, or
-        // disposing the webview ends the listener — never a wall-clock timeout.
-        subscriptions.push(view.onDidChangeVisibility(() => {
-            if (!view.visible) {close();}
-        }));
-        subscriptions.push(view.onDidDispose(close));
-        this._post({ command: 'showCompareDialog', branchName, currentBranch, commits });
+        } catch (error) {
+            if (comparison !== this._comparison || repository !== this._gitService.repositoryPath) {return;}
+            if (message.command === 'previewComparisonFile') {
+                this._post({ command: 'comparisonPreview', id: message.id, requestId: message.requestId,
+                    path: file.path, error: formatGitError(error) });
+            } else {
+                vscode.window.showErrorMessage(t('view.openDiffFailed', { error: formatGitError(error) }));
+            }
+        }
     }
 
     /**
@@ -1315,6 +1347,23 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (message: WebviewToExtMessage) => {
             switch (message.command) {
+                case 'pickComparison':
+                    await this.pickComparison();
+                    break;
+                case 'closeComparison':
+                    this._closeComparison();
+                    break;
+                case 'updateComparison': {
+                    const previous = this._comparison;
+                    if (previous?.id !== message.id || !['pr', 'direct'].includes(message.mode)) {break;}
+                    await this.openComparison(message.swap ? previous.target : previous.source,
+                        message.swap ? previous.source : previous.target, message.mode);
+                    break;
+                }
+                case 'openComparisonFile':
+                case 'previewComparisonFile':
+                    await this._comparisonFile(message);
+                    break;
                 case 'toggleHistoryMode':
                     this.toggleHistoryMode();
                     break;
@@ -1517,6 +1566,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     // still booting; then the authoritative repository state.
                     this._flushScreen();
                     this._postRepoState();
+                    this._post({ command: 'comparisonState', comparison: this._comparison });
                     if (this._lastInProgress) {
                         this._post({ command: 'setInProgress', inProgress: this._lastInProgress });
                     }
@@ -2038,6 +2088,17 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     await vscode.commands.executeCommand('idea-git.newBranchFrom', message.branch ? branchNode : commitNode);
                     forceReload = true;
                     break;
+                case 'compareRevisions': {
+                    const hashes = [...new Set(message.hashes ?? [])];
+                    if (hashes.length !== 2) {return;}
+                    const repository = this._gitService.repositoryPath;
+                    const ordered = await this._gitService.orderCommitsByHistory(hashes);
+                    if (repository !== this._gitService.repositoryPath) {return;}
+                    // Exact versions: unlike selected-commit aggregation, do not
+                    // include the older commit's own parent in this comparison.
+                    await this.openComparison(ordered[1], ordered[0], 'direct');
+                    return;
+                }
                 case 'compareBranch':
                     await vscode.commands.executeCommand('idea-git.compareBranch', branchNode);
                     return;
@@ -2731,6 +2792,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             <div id="btree"></div>
         </div>
         <div class="resizer" id="resizer-left"></div>
+        <div id="main-details">
         <div id="center">
             <div id="history-sync" role="status" aria-live="polite"></div>
             <div id="cbar">
@@ -2760,6 +2822,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     <button class="dr-trigger" id="date-trigger" type="button" data-title="${t('ui.dateRangeHint')}"><span class="dr-text placeholder" id="dr-text">${t('ui.dateRange')}</span></button>
                     <button class="clr" style="display:none" id="clr-date" title="${t('ui.clearDate')}" type="button">&#10005;</button>
                 </div>
+                <button id="btn-compare" type="button" data-title="${t('comparison.open')}" aria-label="${t('comparison.open')}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h11l-3-3M14 12H3l3 3"/></svg></button>
                 <button id="btn-reflog" title="${t('ui.reflog')}">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.2 8a6.2 6.2 0 1 1-1.8-4.4"/><path d="M14.4 1.6v2.8h-2.8"/><path d="M8 4.6V8l2.6 1.6"/></svg>
                 </button>
@@ -2779,6 +2842,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             <div class="repo-row">
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 1.5h6l3 3v10h-9z"/></svg>
                 <span id="repo-name"></span>
+                <button class="col-refresh no-spin" id="detail-layout" type="button" data-title="${t('comparison.layoutBottom')}" aria-label="${t('comparison.layoutBottom')}"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M2 9h12"/></svg></button>
                 <button class="col-refresh" id="tg-files" title="${t('ui.showCommitFiles')}" style="margin-left:auto">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/></svg>
                 </button>
@@ -2786,6 +2850,33 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 1.5v3h-3"/></svg>
                 </button>
             </div>
+            <section id="comparison-panel" aria-label="${t('comparison.title')}">
+                <div class="comparison-toolbar">
+                    <strong>${t('comparison.title')}</strong>
+                    <button id="cp-pick" type="button" data-title="${t('comparison.open')}">${t('comparison.change')}</button>
+                    <button id="cp-pin" type="button" aria-pressed="false">${t('comparison.pin')}</button>
+                    <button id="cp-close" type="button" aria-label="${t('common.close')}">&#10005;</button>
+                </div>
+                <div id="cp-refs"></div>
+                <div class="comparison-modes" role="group" aria-label="${t('comparison.mode')}">
+                    <button id="cp-pr" type="button">${t('comparison.pr')}</button>
+                    <button id="cp-direct" type="button">${t('comparison.direct')}</button>
+                    <button id="cp-swap" type="button" data-title="${t('comparison.swap')}">⇄</button>
+                    <button id="cp-refresh" type="button" data-title="${t('comparison.refresh')}">↻</button>
+                </div>
+                <div id="cp-summary" role="status" aria-live="polite"></div>
+                <div class="comparison-content">
+                    <div class="comparison-file-pane">
+                        <div id="cp-files-head" class="push-files-header"></div>
+                        <div id="cp-files" class="comparison-files"></div>
+                    </div>
+                    <div class="comparison-preview">
+                        <div class="comparison-preview-head"><span id="cp-path"></span><button id="cp-editor" type="button">${t('preview.openInEditor')}</button></div>
+                        <div id="cp-preview"></div>
+                    </div>
+                </div>
+            </section>
+            <div id="commit-detail">
             <div id="d-busy" class="busy"><span class="spin"></span>${t('ui.loadingCommitFiles')}</div>
             <div id="d-files"></div>
             <div class="resizer-v" id="resizer-info"></div>
@@ -2801,6 +2892,8 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             </div>
             <div class="resizer-v" id="resizer-preview" style="display: none;"></div>
             <div id="d-info"></div>
+            </div>
+        </div>
         </div>
     </div>
     <div id="repo-state"></div>

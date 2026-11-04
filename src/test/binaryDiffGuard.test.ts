@@ -80,7 +80,7 @@ describe('every editor diff surface is guarded', () => {
     });
 
     it('routes the panel, commit group, stash, ref and palette diffs through it', () => {
-        assert.equal(countNeedle(path.join(SRC, 'views', 'graphView.ts'), 'openEditorDiff('), 4);
+        assert.equal(countNeedle(path.join(SRC, 'views', 'graphView.ts'), 'openEditorDiff('), 5);
         assert.equal(countNeedle(path.join(SRC, 'extension.ts'), 'openEditorDiff('), 1);
     });
 

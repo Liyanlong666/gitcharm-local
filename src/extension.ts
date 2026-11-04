@@ -197,7 +197,7 @@ export function activate(ctx: vscode.ExtensionContext) {
                     // worktree exactly, and trimming the final newline made
                     // every unmodified file look like it had an added line
                     // at the end.
-                    return await gitService.readBlob(ref, filePath);
+                    return await gitService.readBlob(ref, filePath, params.get('repo') || undefined);
                 } catch {
                     return '';
                 }

@@ -1,5 +1,6 @@
 import { BranchFetchTarget, branchFetchArgs, resolveBranchFetchTarget } from './branchFetch';
 import { loadTrackingHistory, TrackingHistory } from './trackingHistory';
+import { ComparisonMode, ComparisonSnapshot, loadComparison } from './comparison';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -1597,12 +1598,14 @@ export class GitService {
     /**
      * Exact file content at a given ref (backs the diff content provider).
      * Trimming would shift lines and turn the final newline into a phantom
-     * added line when diffed against the worktree copy.
+     * added line when diffed against the worktree copy. repository optionally
+     * pins an already-open diff to its original root after graph navigation.
      */
-    async readBlob(ref: string, filePath: string): Promise<string> {
+    async readBlob(ref: string, filePath: string, repository?: string): Promise<string> {
         assertShellSafe(ref, t('label.ref'));
         assertShellSafe(filePath, t('label.filePath'));
-        return await this.executeGitArgs(['show', this._objectSpec(ref, filePath)]);
+        const args = ['show', this._objectSpec(ref, filePath)];
+        return repository ? await runGit(args, { cwd: repository }) : await this.executeGitArgs(args);
     }
 
     /**
@@ -1646,25 +1649,28 @@ export class GitService {
      * One file's unified diff between two revisions, already split and counted —
      * what the panel draws under the file list. Capped by `maxLines` because it is
      * a preview: the whole patch stays one double-click away in the editor.
+     * basePath includes the old name of a renamed file in the same pathspec;
+     * omitting it would show the new name as an addition instead of a rename.
      */
     async getFileDiffPreview(
         baseRef: string,
         targetRef: string,
         filePath: string,
-        maxLines: number = GitService.DIFF_PREVIEW_LINES
+        maxLines: number = GitService.DIFF_PREVIEW_LINES,
+        basePath?: string
     ): Promise<DiffPreview> {
         assertShellSafe(baseRef, t('label.ref'));
         assertShellSafe(targetRef, t('label.ref'));
         const immutable = /^[0-9a-f]{40}$/.test(baseRef) && /^[0-9a-f]{40}$/.test(targetRef);
         const key = immutable
-            ? `${this._repositoryPath ?? ''}|${baseRef}|${targetRef}|${filePath}|${maxLines}`
+            ? `${this._repositoryPath ?? ''}|${baseRef}|${targetRef}|${filePath}|${basePath ?? filePath}|${maxLines}`
             : undefined;
         if (key) {
             const hit = this._previewCache.get(key);
             if (hit) {return hit;}
         }
         const patch = await this.executeGitArgs([
-            'diff', '--no-color', '--no-ext-diff', `--unified=3`, `${baseRef}..${targetRef}`, '--', filePath
+            'diff', '--no-color', '--no-ext-diff', `--unified=3`, `${baseRef}..${targetRef}`, '--', ...new Set([basePath ?? filePath, filePath])
         ]);
         const preview = parseDiffPreview(patch, maxLines);
         if (key) {this._previewCache.set(key, preview);}
@@ -2281,9 +2287,17 @@ export class GitService {
         return commits;
     }
 
+    /** Read a comparison in one repository, with both refs frozen before the diff. */
+    getComparison(source: string, target: string, mode: ComparisonMode): Promise<ComparisonSnapshot> {
+        const cwd = this._repositoryPath;
+        if (!cwd) {return Promise.reject(new Error(t('ext.noGitRepo')));}
+        return loadComparison(args => runGit(args, { cwd }), source, target, mode);
+    }
+
     /**
-     * Files differing between two refs (tip-to-tip, two-dot). Used by the push
-     * dialog's "全部提交" row and the branch compare dialog's "全部差异" row.
+     * Files differing between two refs (tip-to-tip, two-dot), used by the push
+     * dialog's aggregate row. The graph comparison uses getComparison instead,
+     * since it needs frozen endpoints, statistics and explicit PR/direct modes.
      */
     async getDiffFilesBetweenRefs(baseRef: string, targetRef: string): Promise<Array<{ path: string; status: string; fromPath?: string }>> {
         assertRef(baseRef, t('label.baseRef'));

@@ -67,5 +67,6 @@
     "config.protectedBranches": "受保护分支的模式列表：强制推送或删除这些分支前会再确认一次。`*` 匹配任意字符（如 `release/*`）。只增加确认步骤，不会直接禁止操作。",
     "cmd.showAllBranches": "显示全部本地和远程分支",
     "config.defaultHistoryScope": "默认历史范围：当前本地分支＋实际跟踪分支（tracking）、全部分支（all），或恢复上次选择（lastSelected）。",
-    "cmd.showTrackingHistory": "显示当前本地分支与跟踪远程分支"
+    "cmd.showTrackingHistory": "显示当前本地分支与跟踪远程分支",
+    "cmd.compareReferences": "比较分支…"
 }

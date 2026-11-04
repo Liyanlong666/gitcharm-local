@@ -242,6 +242,7 @@ var state = {
     canCombineHistory: true,
     fetchState: { busy: false },
     detailVisible: false,
+    detailLayout: (vscode.getState() || {}).detailLayout === 'bottom' ? 'bottom' : 'right',
     current: INITIAL.currentBranch || '',
     selectedBranch: INITIAL.selectedBranch || '',
     repoName: INITIAL.repoName || '',
@@ -303,6 +304,7 @@ function saveViewState() {
                 selectedHash: state.selectedHash || '',
                 scrollTop: document.getElementById('scroll').scrollTop,
                 detailVisible: state.detailVisible !== false,
+                detailLayout: state.detailLayout,
                 collapsed: state.collapsed,
                 collapsedSec: state.collapsedSec,
                 expandedFolder: state.expandedFolder,
@@ -345,6 +347,7 @@ function applyRestoreNow() {
         state.graphVisible = pr.graphVisible;
         renderRows();   // the graph column width is baked into the row markup
     }
+    if (pr.detailLayout === 'right' || pr.detailLayout === 'bottom') {state.detailLayout = pr.detailLayout; applyDetailLayout();}
     if (pr.detailVisible === true) { state.detailVisible = true; }
     var commitsLoaded = (state.commits || []).length > 0;
     var target = pr.selectedHash;
@@ -401,11 +404,11 @@ function applyRestoreNow() {
         var main = document.getElementById('main');
         if (!main) {return Infinity;}
         var other = document.getElementById(panel.id === 'left' ? 'right' : 'left');
-        var otherW = (other && other.offsetParent) ? other.offsetWidth : 0;
+        var otherW = (other && other.offsetParent && !(other.id === 'right' && state.detailLayout === 'bottom')) ? other.offsetWidth : 0;
         var resizers = 0;
         ['resizer-left', 'resizer-right'].forEach(function (id) {
             var r = document.getElementById(id);
-            if (r && r.offsetParent) {resizers += r.offsetWidth;}
+            if (r && r.offsetParent && !(id === 'resizer-right' && state.detailLayout === 'bottom')) {resizers += r.offsetWidth;}
         });
         return Math.max(0, main.clientWidth - CENTER_MIN_W - otherW - resizers);
     }
@@ -416,6 +419,7 @@ function applyRestoreNow() {
         if (!resizer || !panel) return;
         var startX, startW;
         resizer.addEventListener('mousedown', function (e) {
+            if (panelId === 'right' && state.detailLayout === 'bottom') {resizeBottomDetails(e); return;}
             startX = e.clientX;
             startW = panel.offsetWidth;
             document.body.style.cursor = 'col-resize';
@@ -488,7 +492,7 @@ function applyRestoreNow() {
         if (!main || main.clientWidth <= CENTER_MIN_W) {return;}
         [['right', 180], ['left', 120]].forEach(function (pair) {
             var p = document.getElementById(pair[0]);
-            if (!p || !p.offsetParent) {return;}
+            if (!p || !p.offsetParent || (pair[0] === 'right' && state.detailLayout === 'bottom')) {return;}
             p.style.width = Math.max(pair[1], Math.min(p.offsetWidth, maxSidePanelWidth(p))) + 'px';
         });
     })();
@@ -1422,6 +1426,12 @@ function syncTagSyncBounds() {
     if (!tagSyncOverlay) {return;}
     var right = document.getElementById('right');
     var edge = window.innerWidth;
+    if (state.detailLayout === 'bottom' && state.detailVisible) {
+        tagSyncOverlay.style.right = '0px';
+        tagSyncOverlay.style.bottom = Math.max(0, window.innerHeight - right.getBoundingClientRect().top + 5) + 'px';
+        return;
+    }
+    tagSyncOverlay.style.bottom = '0px';
     if (state.detailVisible && right && right.offsetWidth > 0) {
         edge = right.getBoundingClientRect().left;
     }
@@ -1476,6 +1486,7 @@ function renderStashDetail(info, filesBox) {
  * matches is a different stash and must not keep the old file list on screen.
  */
 function selectStash(index) {
+    if (comparisonPanel && !comparisonPinned) {closeComparison();}
     var entry = null;
     for (var i = 0; i < state.stashes.length; i++) {
         if (state.stashes[i].index === index) {entry = state.stashes[i]; break;}
@@ -1513,6 +1524,7 @@ function renderDetail() {
     } else {
         repoName.removeAttribute('data-title');
     }
+    if (comparisonPanel) {renderComparison(); return;}
     var info = document.getElementById('d-info');
     var filesBox = document.getElementById('d-files');
     
@@ -2666,6 +2678,7 @@ document.getElementById('rows').addEventListener('click', function (e) {
     var row = e.target.closest('.row');
     if (!row) return;
     
+    if (comparisonPanel && !comparisonPinned) {closeComparison();}
     var hash = row.getAttribute('data-hash');
     var allRows = Array.from(document.querySelectorAll('#rows .row'));
     var currentIndex = allRows.indexOf(row);
@@ -2745,14 +2758,15 @@ document.getElementById('rows').addEventListener('contextmenu', function (e) {
     var isHead = !!state.headHash && hash === state.headHash;
     var items = [];
     
+    if (state.selectedHashes.length === 2) {items.push(['compareRevisions', T('comparison.twoCommits')]);}
     if (isMultiSelect) {
         // Multi-select mode: allow cherry-pick, revert, drop, and squash
-        items = [
+        items = items.concat([
             ['cherryPick', T('menu.cherryPick') + ' (' + state.selectedHashes.length + ')'],
             ['revert', T('menu.revert') + ' (' + state.selectedHashes.length + ')'],
             ['dropCommit', T('menu.dropCommit') + ' (' + state.selectedHashes.length + ')'],
             ['squashCommits', T('menu.squashCommits') + ' (' + state.selectedHashes.length + ')']
-        ];
+        ]);
     } else {
         // Single-select mode: show all options
         items = [
@@ -2927,6 +2941,7 @@ function renderPreview() {
     var resizer = document.getElementById('resizer-preview');
     var body = document.getElementById('dp-body');
     var p = state.preview;
+    document.getElementById('right').classList.toggle('preview-active', !!p);
     if (!p) {
         box.style.display = 'none';
         if (resizer) {resizer.style.display = 'none';}
@@ -3737,6 +3752,7 @@ window.addEventListener('message', function (ev) {
         setTopLoader(false);
     } else if (m.command === 'setDetail') {
         if (m.origin === 'tagSync') {
+            if (comparisonPanel) {closeComparison();}
             // A commit picked in the tag-diff dialog, not in the log: the row
             // selection stays as it was, but the card must not keep deferring
             // to a stash or a multi-select group that is still remembered.
@@ -3962,10 +3978,10 @@ window.addEventListener('message', function (ev) {
         showTagSyncDialog(m.remote || '', m.rows || []);
     } else if (m.command === 'pushFilesResponse') {
         window._handlePushFiles(m.hash, m.files || []);
-    } else if (m.command === 'showCompareDialog') {
-        showCompareDialog(m.branchName, m.currentBranch, m.commits || []);
-    } else if (m.command === 'compareFilesResponse') {
-        window._handleCompareFiles(m.hash, m.files || []);
+    } else if (m.command === 'comparisonState') {
+        acceptComparison(m.comparison);
+    } else if (m.command === 'comparisonPreview') {
+        acceptComparisonPreview(m);
     } else if (m.command === 'showFileHistory') {
         showFileHistoryDialog(m.filePath, m.history || []);
     } else if (m.command === 'showReflog') {
@@ -4627,137 +4643,6 @@ window._handlePushFiles = function (hash, files) {
     pushState.filesCache[hash] = files;
     if (pushState.selectedHash === hash) {
         refreshPushFiles();
-    }
-};
-
-/* ---- branch compare dialog (read-only) ---- */
-var compareState = { commits: [], selectedHash: null, filesCache: {}, branchName: '', currentBranch: '', visibleCount: 20, fileViewMode: 'tree', collapsedDirs: {} };
-
-function showCompareDialog(branchName, currentBranch, commits) {
-    compareState = { commits: commits, selectedHash: '__all__', filesCache: {}, branchName: branchName, currentBranch: currentBranch, visibleCount: 20, fileViewMode: state.fileViewMode || 'tree', collapsedDirs: {} };
-    var overlay = document.createElement('div');
-    overlay.className = 'push-dialog-overlay';
-    overlay.id = 'compare-dialog';
-
-    // Aggregate row: all files differing between the two branch tips
-    var allRowHtml = '<div class="push-commit-row push-all-row sel" data-hash="__all__" data-title="' + esc(T('compare.allDiffTip')) + '">' +
-        '<span class="push-commit-msg push-all-label">' + T('compare.allDiff') + '</span>' +
-        '</div>';
-
-    function renderCommitBatch(startIdx, endIdx) {
-        return commits.slice(startIdx, endIdx).map(function (c) {
-            return dialogCommitRowHtml(c, c.hash === compareState.selectedHash);
-        }).join('');
-    }
-
-    var commitRows = renderCommitBatch(0, 20);
-    var loadMoreHtml = '';
-    if (commits.length > 20) {
-        loadMoreHtml = '<div class="push-load-more-container"><button class="push-load-more-btn">' + T('common.loadMoreCommits', { n: commits.length - 20 }) + '</button></div>';
-    }
-
-    var subtitle = commits.length > 0
-        ? T('compare.unique', { n: commits.length, branch: esc(branchName) })
-        : T('compare.sameCommits');
-    var headerText = T('compare.title') + esc(currentBranch) + ' <span class="push-arrow">⇄</span> ' + esc(branchName) +
-        ' <span class="push-compare-sub">' + subtitle + '</span>';
-
-    overlay.innerHTML = '<div class="push-dialog-box">' +
-        '<div class="push-dialog-header">' + headerText + '</div>' +
-        '<div class="push-dialog-body">' +
-        '<div class="push-commits-list"><div class="push-commits-scroll" id="compare-commits-scroll">' + allRowHtml + commitRows + loadMoreHtml + '</div></div>' +
-        dialogSidePanelHtml({ head: 'compare-files-head', list: 'compare-files-list', detail: 'compare-commit-detail' }) +
-        '</div>' +
-        '<div class="push-dialog-actions">' +
-        '<button class="dialog-btn secondary" data-action="close">' + T('common.close') + '</button>' +
-        '</div></div>';
-
-    document.body.appendChild(overlay);
-    attachDialogResize(overlay, 'compare');
-
-    function attachCommitClickHandlers() {
-        overlay.querySelectorAll('.push-commit-row').forEach(function (row) {
-            row.addEventListener('click', function () {
-                overlay.querySelectorAll('.push-commit-row').forEach(function (r) { r.classList.remove('sel'); });
-                row.classList.add('sel');
-                compareState.selectedHash = row.getAttribute('data-hash');
-                loadCompareFiles(compareState.selectedHash);
-            });
-        });
-    }
-    attachCommitClickHandlers();
-
-    var loadMoreBtn = overlay.querySelector('.push-load-more-btn');
-    if (loadMoreBtn) {
-        loadMoreBtn.addEventListener('click', function () {
-            var currentVisible = compareState.visibleCount || 20;
-            var nextBatchEnd = Math.min(currentVisible + 20, commits.length);
-            var newRows = renderCommitBatch(currentVisible, nextBatchEnd);
-            var loadMoreContainer = overlay.querySelector('.push-load-more-container');
-            if (loadMoreContainer) {
-                var tempDiv = document.createElement('div');
-                tempDiv.innerHTML = newRows;
-                while (tempDiv.firstChild) {
-                    loadMoreContainer.parentNode.insertBefore(tempDiv.firstChild, loadMoreContainer);
-                }
-            }
-            compareState.visibleCount = nextBatchEnd;
-            attachCommitClickHandlers();
-            if (nextBatchEnd < commits.length) {
-                loadMoreBtn.textContent = T('common.loadMoreCommits', { n: commits.length - nextBatchEnd });
-            } else {
-                loadMoreBtn.parentElement.remove();
-            }
-        });
-    }
-
-    overlay.querySelectorAll('.push-dialog-actions .dialog-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            overlay.remove();
-            vscode.postMessage({ command: 'compareDialogClosed' });
-        });
-    });
-
-    attachFilePaneHandlers(overlay, compareState, refreshCompareFiles, function (path) {
-        vscode.postMessage({ command: 'compareFileDiff', hash: compareState.selectedHash || '__all__', path: path });
-    });
-
-    loadCompareFiles('__all__');
-}
-
-function refreshCompareFiles() {
-    var files = compareState.filesCache[compareState.selectedHash];
-    if (!files) {return;} // still loading: keep the spinner
-    renderDialogFiles(document.getElementById('compare-files-head'), document.getElementById('compare-files-list'), files, compareState);
-}
-
-function loadCompareFiles(hash) {
-    var el = document.getElementById('compare-commit-detail');
-    var commit = hash && hash !== '__all__'
-        ? compareState.commits.filter(function (c) { return c.hash === hash; })[0]
-        : null;
-    if (el) {renderDialogDetail(el, commit, compareState.commits);}
-
-    var head = document.getElementById('compare-files-head');
-    var list = document.getElementById('compare-files-list');
-    if (!list) {return;}
-    if (compareState.filesCache[hash]) {
-        renderDialogFiles(head, list, compareState.filesCache[hash], compareState);
-        return;
-    }
-    if (head) {head.innerHTML = '<span>' + T('common.loadingFiles') + '</span>' + fileModeBtnHtml(compareState.fileViewMode);}
-    list.innerHTML = '<div class="push-files-loading"><span class="spin"></span> ' + T('common.loadingFiles') + '</div>';
-    if (hash === '__all__') {
-        vscode.postMessage({ command: 'getCompareAllFiles' });
-    } else {
-        vscode.postMessage({ command: 'getCompareFiles', hash: hash });
-    }
-}
-
-window._handleCompareFiles = function (hash, files) {
-    compareState.filesCache[hash] = files;
-    if (compareState.selectedHash === hash) {
-        refreshCompareFiles();
     }
 };
 
@@ -5473,4 +5358,190 @@ renderOperationStatus();
 renderTree();
 renderRows();
 renderDetail();
+/* ---- embedded comparison: host snapshots, local presentation only ---- */
+var comparisonPanel = null;
+var comparisonPinned = !!(vscode.getState() || {}).comparisonPinned;
+var comparisonFiles = { fileViewMode: 'tree', collapsedDirs: {} };
+var comparisonPreview = null;
+var comparisonPreviewRequest = 0;
+
+/** Hashes and files are authoritative host data; changing mode replaces the snapshot. */
+function acceptComparison(next) {
+    if (!next || !comparisonPanel || next.id !== comparisonPanel.id) {
+        comparisonPreview = null;
+        comparisonPreviewRequest++;
+        comparisonFiles.collapsedDirs = {};
+    }
+    comparisonPanel = next || null;
+    document.getElementById('right').classList.toggle('comparison-open', !!comparisonPanel);
+    if (comparisonPanel) {state.detailVisible = true;}
+    renderDetail();
+}
+
+function closeComparison() {
+    acceptComparison(null);
+    vscode.postMessage({ command: 'closeComparison' });
+}
+
+function comparisonRefLabel(ref) { return String(ref || '').replace(/^refs\/(heads|remotes)\//, ''); }
+
+function renderComparison() {
+    var panel = comparisonPanel;
+    if (!panel) {return;}
+    var snapshot = panel.snapshot;
+    var busy = !snapshot && !panel.error;
+    var refs = document.getElementById('cp-refs');
+    refs.innerHTML = '<div><span>' + esc(T('comparison.source')) + '</span><strong data-title="' + esc(panel.source) + '">' + esc(comparisonRefLabel(panel.source)) + '</strong></div>' +
+        '<div><span>' + esc(T('comparison.target')) + '</span><strong data-title="' + esc(panel.target) + '">' + esc(comparisonRefLabel(panel.target)) + '</strong></div>';
+    document.getElementById('cp-pr').classList.toggle('active', panel.mode === 'pr');
+    document.getElementById('cp-direct').classList.toggle('active', panel.mode === 'direct');
+    ['cp-pr', 'cp-direct', 'cp-swap', 'cp-refresh'].forEach(function (id) {document.getElementById(id).disabled = busy;});
+    document.getElementById('cp-pin').textContent = T(comparisonPinned ? 'comparison.unpin' : 'comparison.pin');
+    document.getElementById('cp-pin').setAttribute('aria-pressed', String(comparisonPinned));
+    var summary = document.getElementById('cp-summary');
+    summary.classList.toggle('err', !!panel.error);
+    summary.innerHTML = panel.error ? esc(T('comparison.failed', { error: panel.error })) : busy ? esc(T('comparison.loading')) :
+        '<div class="comparison-totals"><strong>' + esc(T('w.filesCount', { n: snapshot.files.length })) + '</strong><span class="comparison-added">+' + snapshot.added + '</span><span class="comparison-deleted">−' + snapshot.deleted + '</span></div>' +
+        '<div>' + esc(T('comparison.commits', { ahead: snapshot.ahead, behind: snapshot.behind })) + '</div>' +
+        '<div class="comparison-base" data-title="' + esc(snapshot.baseHash + ' → ' + snapshot.sourceHash) + '">' + esc(T('comparison.base')) + ' ' + esc(snapshot.baseHash.slice(0, 8)) + ' → ' + esc(snapshot.sourceHash.slice(0, 8)) + '</div>' +
+        '<div class="comparison-note">' + esc(T(panel.mode === 'pr' ? 'comparison.prHint' : 'comparison.directHint')) + '</div>';
+    renderDialogFiles(document.getElementById('cp-files-head'), document.getElementById('cp-files'), snapshot ? snapshot.files : [], comparisonFiles);
+    document.querySelectorAll('#cp-files .file').forEach(function (row) {
+        var file = snapshot.files.find(function (f) {return f.path === row.getAttribute('data-path');});
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.classList.toggle('sel', !!comparisonPreview && file.path === comparisonPreview.path);
+        var count = document.createElement('span');
+        count.className = 'comparison-file-stat';
+        count.textContent = '+' + file.added + ' −' + file.deleted;
+        row.appendChild(count);
+        if (file.fromPath) {row.setAttribute('data-title', file.fromPath + ' → ' + file.path);}
+    });
+    renderComparisonPreview();
+}
+
+function previewComparisonPath(path) {
+    if (!comparisonPanel || !comparisonPanel.snapshot) {return;}
+    comparisonPreview = { path: path, loading: true, requestId: ++comparisonPreviewRequest };
+    // Preserve the clicked DOM row so the second click can still become a double-click.
+    document.querySelectorAll('#cp-files .file').forEach(function (row) {
+        row.classList.toggle('sel', row.getAttribute('data-path') === path);
+    });
+    renderComparisonPreview();
+    vscode.postMessage({ command: 'previewComparisonFile', id: comparisonPanel.id, path: path, requestId: comparisonPreviewRequest });
+}
+
+function acceptComparisonPreview(message) {
+    if (!comparisonPanel || message.id !== comparisonPanel.id || !comparisonPreview ||
+        message.requestId !== comparisonPreview.requestId || message.path !== comparisonPreview.path) {return;}
+    comparisonPreview = message;
+    renderComparisonPreview();
+}
+
+function renderComparisonPreview() {
+    var preview = comparisonPreview;
+    document.getElementById('cp-path').textContent = preview ? preview.path : T('comparison.chooseFile');
+    document.getElementById('cp-editor').disabled = !preview || preview.loading || !comparisonPanel || !comparisonPanel.snapshot;
+    var body = document.getElementById('cp-preview');
+    if (!preview) {body.innerHTML = '<div class="dp-note">' + esc(T('comparison.chooseFile')) + '</div>'; return;}
+    if (preview.loading) {body.innerHTML = '<div class="dp-note">' + esc(T('preview.loading')) + '</div>'; return;}
+    var html = '';
+    if (preview.error) {html = '<div class="dp-note err">' + esc(T('preview.failed', { error: preview.error })) + '</div>';}
+    else if (preview.binary) {html = '<div class="dp-note">' + esc(T('preview.binary')) + '</div>';}
+    else {
+        html = (preview.lines || []).map(diffLineHtml).join('');
+        if (!html) {html = '<div class="dp-note">' + esc(T('preview.empty')) + '</div>';}
+        if (preview.truncated) {html += '<div class="dp-note">' + esc(T('preview.truncated', { n: preview.lines.length })) + '</div>';}
+    }
+    body.innerHTML = html;
+    body.scrollTop = 0;
+}
+
+function openComparisonPath(path) {
+    if (comparisonPanel && comparisonPanel.snapshot) {
+        vscode.postMessage({ command: 'openComparisonFile', id: comparisonPanel.id, path: path });
+    }
+}
+
+['btn-compare', 'cp-pick'].forEach(function (id) {
+    document.getElementById(id).addEventListener('click', function () {vscode.postMessage({ command: 'pickComparison' });});
+});
+document.getElementById('cp-close').addEventListener('click', closeComparison);
+document.getElementById('cp-pin').addEventListener('click', function () {
+    comparisonPinned = !comparisonPinned;
+    var saved = vscode.getState() || {}; saved.comparisonPinned = comparisonPinned; vscode.setState(saved);
+    renderComparison();
+});
+['cp-pr', 'cp-direct', 'cp-swap', 'cp-refresh'].forEach(function (id) {
+    document.getElementById(id).addEventListener('click', function () {
+        if (!comparisonPanel) {return;}
+        var mode = id === 'cp-pr' ? 'pr' : id === 'cp-direct' ? 'direct' : comparisonPanel.mode;
+        vscode.postMessage({ command: 'updateComparison', id: comparisonPanel.id, mode: mode, swap: id === 'cp-swap' });
+    });
+});
+document.getElementById('cp-files-head').addEventListener('click', function (e) {
+    var button = e.target.closest('.fmode-btn');
+    if (!button) {return;}
+    comparisonFiles.fileViewMode = comparisonFiles.fileViewMode === 'tree' ? 'flat' : 'tree';
+    renderComparison();
+});
+document.getElementById('cp-files').addEventListener('click', function (e) {
+    var folder = e.target.closest('.push-file-row.dir');
+    if (folder) {
+        var dir = folder.getAttribute('data-path');
+        comparisonFiles.collapsedDirs[dir] = !comparisonFiles.collapsedDirs[dir]; renderComparison(); return;
+    }
+    var row = e.target.closest('.file');
+    if (row) {previewComparisonPath(row.getAttribute('data-path'));}
+});
+document.getElementById('cp-files').addEventListener('dblclick', function (e) {
+    var row = e.target.closest('.file'); if (row) {openComparisonPath(row.getAttribute('data-path'));}
+});
+document.getElementById('cp-files').addEventListener('keydown', function (e) {
+    var row = e.target.closest('.file');
+    if (row && e.key === 'Enter') {e.preventDefault(); openComparisonPath(row.getAttribute('data-path'));}
+});
+document.getElementById('cp-editor').addEventListener('click', function () {
+    if (comparisonPreview) {openComparisonPath(comparisonPreview.path);}
+});
+
+/** Same detail content in either layout. Only presentation state is persisted. */
+function applyDetailLayout() {
+    var bottom = state.detailLayout === 'bottom';
+    document.getElementById('main').classList.toggle('detail-bottom', bottom);
+    var right = document.getElementById('right');
+    var saved = vscode.getState() || {};
+    right.style.height = bottom ? Math.max(130, Math.min(saved.detailBottomHeight || 260, window.innerHeight * 0.65)) + 'px' : '';
+    var button = document.getElementById('detail-layout');
+    var label = T(bottom ? 'comparison.layoutRight' : 'comparison.layoutBottom');
+    button.setAttribute('data-title', label); button.setAttribute('aria-label', label);
+    syncTagSyncBounds();
+}
+
+function resizeBottomDetails(e) {
+    if (e.button !== 0) {return;}
+    e.preventDefault();
+    var panel = document.getElementById('right');
+    var startY = e.clientY, startHeight = panel.offsetHeight;
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+    function move(event) {
+        var available = document.getElementById('main-details').clientHeight;
+        panel.style.height = Math.max(110, Math.min(startHeight + startY - event.clientY, available - 110)) + 'px';
+        syncTagSyncBounds();
+    }
+    function finish() {
+        document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', finish);
+        document.body.style.cursor = ''; document.body.style.userSelect = '';
+        var saved = vscode.getState() || {}; saved.detailBottomHeight = panel.offsetHeight; vscode.setState(saved);
+    }
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', finish);
+}
+
+document.getElementById('detail-layout').addEventListener('click', function () {
+    state.detailLayout = state.detailLayout === 'bottom' ? 'right' : 'bottom';
+    var saved = vscode.getState() || {}; saved.detailLayout = state.detailLayout; vscode.setState(saved);
+    applyDetailLayout(); saveViewState();
+});
+applyDetailLayout();
+
 vscode.postMessage({ command: 'ready' });

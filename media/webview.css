@@ -2900,3 +2900,71 @@ button.tag-sync-hash.on {
 .history-fetch-time { color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
 #btn-refresh.fetching svg { animation: gitcharm-fetch-spin 0.85s linear infinite; }
 @keyframes gitcharm-fetch-spin { to { transform: rotate(360deg); } }
+
+/* The graph and detail pane share one flex area; the branch tree stays at left. */
+#main-details { display: flex; flex: 1; min-width: 0; min-height: 0; }
+#commit-detail { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+#main.detail-bottom #main-details { flex-direction: column; }
+#main.detail-bottom #center { min-height: 100px; }
+#main.detail-bottom #right { width: 100% !important; min-height: 110px; max-height: calc(100% - 110px); border-left: 0; border-top: 1px solid var(--vscode-panel-border); }
+#main.detail-bottom #resizer-right { height: 5px; width: 100%; cursor: row-resize; }
+#main.detail-bottom #commit-detail { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(180px, 1fr); }
+#main.detail-bottom #d-files { grid-column: 1; grid-row: 1; height: auto !important; min-height: 0; }
+#main.detail-bottom #d-info { grid-column: 2; grid-row: 1; }
+#main.detail-bottom #right.preview-active #commit-detail { grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.5fr) minmax(160px, 1fr); }
+#main.detail-bottom #right.preview-active #d-preview { grid-column: 2; grid-row: 1; height: auto !important; }
+#main.detail-bottom #right.preview-active #d-info { grid-column: 3; }
+#main.detail-bottom #resizer-info, #main.detail-bottom #resizer-preview { display: none !important; }
+#comparison-panel { display: none; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
+#right.comparison-open #comparison-panel { display: flex; }
+#right.comparison-open #commit-detail { display: none; }
+.comparison-toolbar { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+.comparison-toolbar strong { margin-right: auto; font-size: 12px; }
+#comparison-panel button, #btn-compare { border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 4px 7px; color: var(--vscode-foreground); background: transparent; cursor: pointer; font: inherit; }
+#comparison-panel button:hover, #btn-compare:hover { background: var(--vscode-toolbar-hoverBackground); }
+#comparison-panel button:focus-visible, #cp-files .file:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+#comparison-panel button:disabled { opacity: .45; cursor: default; }
+#comparison-panel button.active, #comparison-panel button[aria-pressed="true"] { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-background); }
+#cp-refs { padding: 8px 10px 4px; display: grid; gap: 5px; }
+#cp-refs > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#cp-refs span { flex: none; color: var(--vscode-descriptionForeground); font-size: 11px; }
+#cp-refs strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.comparison-modes { display: flex; gap: 5px; padding: 5px 10px; }
+#cp-refresh { margin-left: auto; }
+#cp-summary { padding: 5px 10px 8px; font-size: 11px; line-height: 1.6; border-bottom: 1px solid var(--vscode-panel-border); }
+#cp-summary.err { color: var(--vscode-errorForeground); overflow: auto; max-height: 100px; white-space: pre-wrap; }
+.comparison-totals { display: flex; gap: 10px; font-size: 12px; }
+.comparison-added { color: var(--vscode-gitDecoration-addedResourceForeground, #4ab07a); }
+.comparison-deleted { color: var(--vscode-gitDecoration-deletedResourceForeground, #d0704a); }
+.comparison-base, .comparison-note { color: var(--vscode-descriptionForeground); }
+.comparison-base { font-family: var(--vscode-editor-font-family); }
+.comparison-content { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.comparison-file-pane { flex: 1; min-height: 60px; display: flex; flex-direction: column; }
+#cp-files-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 10px; font-size: 11px; }
+.comparison-files { flex: 1; overflow: auto; min-height: 0; }
+#cp-files .push-file-row { min-width: max-content; cursor: pointer; }
+#cp-files .push-file-row.sel { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+.comparison-file-stat { margin-left: auto; padding-left: 12px; font: 10px var(--vscode-editor-font-family); opacity: .8; }
+.comparison-preview { flex: 1; min-height: 60px; display: flex; flex-direction: column; border-top: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); }
+.comparison-preview-head { display: flex; gap: 8px; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--vscode-panel-border); }
+#cp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+#cp-editor { flex: none; font-size: 10px !important; }
+#cp-preview { flex: 1; min-height: 0; overflow: auto; font: 11px/1.6 var(--vscode-editor-font-family); }
+#main.detail-bottom .comparison-content { flex-direction: row; }
+#main.detail-bottom .comparison-file-pane { flex: 0 0 35%; min-width: 170px; }
+#main.detail-bottom .comparison-preview { border-top: 0; border-left: 1px solid var(--vscode-panel-border); min-width: 0; }
+#main.detail-bottom #cp-refs { grid-template-columns: 1fr 1fr; }
+#main.detail-bottom #cp-summary { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+#main.detail-bottom .comparison-note { display: none; }
+/* In bottom placement, controls share two compact rows so the diff keeps height. */
+#main.detail-bottom #right.comparison-open #comparison-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr);
+}
+#main.detail-bottom .comparison-toolbar { grid-column: 2; grid-row: 1; border-bottom: 0; padding: 4px 10px; }
+#main.detail-bottom .comparison-toolbar strong { display: none; }
+#main.detail-bottom #cp-refs { grid-column: 1; grid-row: 1; padding: 5px 10px; }
+#main.detail-bottom .comparison-modes { grid-column: 2; grid-row: 2; margin: 0; border-bottom: 1px solid var(--vscode-panel-border); }
+#main.detail-bottom #cp-summary { grid-column: 1; grid-row: 2; align-items: center; padding: 4px 10px; }
+#main.detail-bottom .comparison-content { grid-column: 1 / -1; grid-row: 3; }

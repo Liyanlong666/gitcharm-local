@@ -2,16 +2,16 @@
   "name": "git-charm",
   "displayName": "GitCharm — IDEA Git Log & Graph (Local)",
   "description": "%ext.description%",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "liugui",
   "icon": "resources/icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Git0gui/gitcharm.git"
+    "url": "https://github.com/Liyanlong666/gitcharm-local.git"
   },
   "bugs": {
-    "url": "https://github.com/Git0gui/gitcharm/issues"
+    "url": "https://github.com/Liyanlong666/gitcharm-local/issues"
   },
   "keywords": [
     "git",
@@ -289,6 +289,11 @@
         "command": "idea-git.showTrackingHistory",
         "title": "%cmd.showTrackingHistory%",
         "category": "GitCharm"
+      },
+      {
+        "command": "idea-git.compareReferences",
+        "title": "%cmd.compareReferences%",
+        "category": "GitCharm"
       }
     ],
     "viewsContainers": {
@@ -516,5 +521,6 @@
     "@vscode/vsce": "^4.0.0",
     "eslint": "^8.0.0",
     "typescript": "^5.0.0"
-  }
+  },
+  "homepage": "https://github.com/Liyanlong666/gitcharm-local"
 }

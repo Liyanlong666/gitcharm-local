@@ -68,5 +68,9 @@
     "cmd.showAllBranches": "Show All Local and Remote Branches",
     "config.defaultHistoryScope": "Initial history scope: current local branch with its configured upstream (tracking), all branches (all), or restore the selected branch (lastSelected).",
     "cmd.showTrackingHistory": "Show current local branch and upstream",
-    "cmd.compareReferences": "Compare Branches…"
+    "cmd.compareReferences": "Compare Branches…",
+    "cmd.compareReferencesInPanel": "Compare Branches in Bottom Panel…",
+    "config.comparisonLocation": "Where to open branch and revision comparisons",
+    "config.comparisonLocation.editor": "Independent editor tab with file tree and side-by-side diff",
+    "config.comparisonLocation.panel": "Embedded comparison in the GitCharm details pane"
 }

@@ -1,4 +1,5 @@
-import { ComparisonMode } from '../services/comparison';
+import { ComparisonEditor } from './comparisonEditor';
+import { ComparisonLocation, ComparisonMode } from '../services/comparison';
 import { BranchFetchTarget } from '../services/branchFetch';
 import { TrackingHistory, trackingLocalForSelection } from '../services/trackingHistory';
 import * as vscode from 'vscode';
@@ -1041,7 +1042,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
     }
 
     /** Choose explicit source/target refs without switching branches or fetching. */
-    async pickComparison(): Promise<void> {
+    async pickComparison(location?: ComparisonLocation): Promise<void> {
         const repository = this._gitService.repositoryPath;
         try {
             const details = await this._gitService.getBranchesWithDetails();
@@ -1059,19 +1060,25 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 ignoreFocusOut: true
             });
             if (!target || repository !== this._gitService.repositoryPath) {return;}
-            await this.openComparison(source.ref, target.ref, 'pr');
+            await this.openComparison(source.ref, target.ref, 'pr', location);
         } catch (error) {
             vscode.window.showErrorMessage(t('branch.compareFailed', { error: formatGitError(error) }));
         }
     }
 
     /**
-     * Open the embedded review surface. Failed reads stay visible as errors;
-     * a newer selection or repository switch invalidates the pending response.
+     * Open in an independent editor by default, or the optional embedded surface.
+     * Failed reads stay visible as errors. Embedded requests are invalidated by
+     * graph repository switches; independent tabs keep their original repository.
      */
-    async openComparison(source: string, target: string, mode: ComparisonMode): Promise<void> {
+    async openComparison(source: string, target: string, mode: ComparisonMode, location?: ComparisonLocation): Promise<void> {
         const repository = this._gitService.repositoryPath;
         if (!repository) {return;}
+        const placement = location ?? vscode.workspace.getConfiguration('idea-git').get<ComparisonLocation>('comparisonLocation', 'editor');
+        if (placement !== 'panel') {
+            ComparisonEditor.show(this._gitService, this._extensionUri, { repository, source, target, mode });
+            return;
+        }
         const comparison: ComparisonPanelState = { id: ++this._comparisonSequence, source, target, mode };
         this._comparison = comparison;
         this._comparisonRepository = repository;
@@ -1348,7 +1355,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (message: WebviewToExtMessage) => {
             switch (message.command) {
                 case 'pickComparison':
-                    await this.pickComparison();
+                    await this.pickComparison(message.location);
                     break;
                 case 'closeComparison':
                     this._closeComparison();
@@ -1357,7 +1364,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     const previous = this._comparison;
                     if (previous?.id !== message.id || !['pr', 'direct'].includes(message.mode)) {break;}
                     await this.openComparison(message.swap ? previous.target : previous.source,
-                        message.swap ? previous.source : previous.target, message.mode);
+                        message.swap ? previous.source : previous.target, message.mode, 'panel');
                     break;
                 }
                 case 'openComparisonFile':

@@ -30,6 +30,8 @@ export function gitBlobUri(ref: string, filePath: string, repository?: string): 
  * Returns false when nothing was opened because the change is binary.
  * For a rename, basePath is the old name in the left revision; filePath is
  * the new name in the right revision. Other callers use the same path on both.
+ * Independent comparison tabs pass their own repository rather than the graph's
+ * currently selected root, for both binary classification and blob reads.
  */
 export async function openEditorDiff(
     gitService: GitService,
@@ -37,14 +39,12 @@ export async function openEditorDiff(
     targetRef: string,
     filePath: string,
     title: string,
-    basePath: string = filePath
+    basePath: string = filePath,
+    repository: string | undefined = gitService.repositoryPath
 ): Promise<boolean> {
-    // Both documents must keep reading the original repository after navigation
-    // switches the graph to another repository in the same workspace.
-    const repository = gitService.repositoryPath;
     // Not being able to classify the change is no reason to withhold the diff the
     // user asked for: this gate exists to stop a hung editor, not to gate normal work.
-    const binary = await gitService.isBinaryChange(baseRef, targetRef, filePath).catch(() => false);
+    const binary = await gitService.isBinaryChange(baseRef, targetRef, filePath, repository).catch(() => false);
     if (binary) {
         vscode.window.showInformationMessage(t('file.binaryDiff', { path: filePath }));
         return false;

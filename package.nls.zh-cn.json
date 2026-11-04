@@ -68,5 +68,9 @@
     "cmd.showAllBranches": "显示全部本地和远程分支",
     "config.defaultHistoryScope": "默认历史范围：当前本地分支＋实际跟踪分支（tracking）、全部分支（all），或恢复上次选择（lastSelected）。",
     "cmd.showTrackingHistory": "显示当前本地分支与跟踪远程分支",
-    "cmd.compareReferences": "比较分支…"
+    "cmd.compareReferences": "比较分支…",
+    "cmd.compareReferencesInPanel": "在底部面板比较分支…",
+    "config.comparisonLocation": "分支和版本比较的打开位置",
+    "config.comparisonLocation.editor": "独立编辑器标签页：文件树与左右差异",
+    "config.comparisonLocation.panel": "嵌入 GitCharm 详情面板"
 }

@@ -1685,14 +1685,16 @@ export class GitService {
      * keeps spinning with nothing readable in it. The panel's inline preview
      * already refuses these files with a one-line note; the editor has to give
      * the same answer instead of a hung pane.
+     * repository pins the read for comparison tabs that outlive graph navigation.
      */
-    async isBinaryChange(baseRef: string, targetRef: string, filePath: string): Promise<boolean> {
+    async isBinaryChange(baseRef: string, targetRef: string, filePath: string, repository?: string): Promise<boolean> {
         assertShellSafe(baseRef, t('label.ref'));
         assertShellSafe(targetRef, t('label.ref'));
         assertShellSafe(filePath, t('label.filePath'));
-        const numstat = await this.executeGitArgs([
+        const args = [
             'diff', '--numstat', `${baseRef}..${targetRef}`, '--', filePath
-        ]);
+        ];
+        const numstat = repository ? await runGit(args, { cwd: repository }) : await this.executeGitArgs(args);
         return isBinaryNumstat(numstat);
     }
 

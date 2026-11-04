@@ -1,7 +1,8 @@
-import { assertHash, assertRef, FileStatLike, parseDiffTreeRawNumstat } from './gitUtils';
+import { assertHash, assertRef, DiffPreview, DiffPreviewLine, FileStatLike, parseDiffPreview, parseDiffTreeRawNumstat } from './gitUtils';
 import { t } from '../i18n';
 
 export type ComparisonMode = 'pr' | 'direct';
+export type ComparisonLocation = 'editor' | 'panel';
 
 /** A read-only comparison frozen at two commits; labels never replace its hashes. */
 export interface ComparisonSnapshot {
@@ -20,6 +21,52 @@ export interface ComparisonSnapshot {
 }
 
 export type ComparisonRun = (args: string[]) => Promise<string>;
+
+/** A single aligned display row. Hunk/metadata rows span both columns. */
+export interface ComparisonSplitRow {
+    note?: string;
+    left?: { line?: number; text: string; changed: boolean };
+    right?: { line?: number; text: string; changed: boolean };
+}
+
+/**
+ * Align replacement blocks by their ordinal lines, padding the shorter side.
+ * This is display alignment only, not a claim that paired lines are equivalent;
+ * the original Git line numbers and text are preserved on their own sides.
+ */
+export function splitComparisonLines(lines: readonly DiffPreviewLine[]): ComparisonSplitRow[] {
+    const rows: ComparisonSplitRow[] = [];
+    let removed: DiffPreviewLine[] = [], added: DiffPreviewLine[] = [];
+    const flush = () => {
+        for (let i = 0; i < Math.max(removed.length, added.length); i++) {
+            rows.push({
+                left: removed[i] ? { line: removed[i].old, text: removed[i].text, changed: true } : undefined,
+                right: added[i] ? { line: added[i].next, text: added[i].text, changed: true } : undefined
+            });
+        }
+        removed = []; added = [];
+    };
+    for (const line of lines) {
+        if (line.kind === 'del') {removed.push(line); continue;}
+        if (line.kind === 'add') {added.push(line); continue;}
+        flush();
+        if (line.kind === 'context') {
+            rows.push({ left: { line: line.old, text: line.text, changed: false },
+                right: { line: line.next, text: line.text, changed: false } });
+        } else {rows.push({ note: line.text });}
+    }
+    flush();
+    return rows;
+}
+
+/** Read only a file in the trusted snapshot, including both paths for renames. */
+export async function loadComparisonFile(run: ComparisonRun, snapshot: ComparisonSnapshot, filePath: string): Promise<DiffPreview> {
+    const file = snapshot.files.find(item => item.path === filePath);
+    if (!file) {throw new Error(t('comparison.fileNotInSnapshot'));}
+    const patch = await run(['diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', '--unified=5',
+        snapshot.baseHash, snapshot.sourceHash, '--', ...new Set([file.fromPath ?? file.path, file.path])]);
+    return parseDiffPreview(patch, 2400);
+}
 
 /**
  * Resolve branch/tag/commit inputs once, then use immutable hashes for counting

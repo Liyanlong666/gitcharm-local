@@ -4,7 +4,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { runGit } from '../services/gitRunner';
-import { loadComparison } from '../services/comparison';
+import { loadComparison, loadComparisonFile, splitComparisonLines } from '../services/comparison';
+import { parseDiffPreview } from '../services/gitUtils';
 
 /** Two real diverged branches, with a rename and dirty working copy: PR scope is directional. */
 it('compares merge-base or exact tips without including target-only or uncommitted work', async () => {
@@ -41,6 +42,10 @@ it('compares merge-base or exact tips without including target-only or uncommitt
         const renamed = pr.files.find(file => file.path === 'renamed file.txt');
         assert.equal(renamed?.status, 'R'); assert.equal(renamed?.fromPath, 'original.txt');
         assert.ok(!pr.files.some(file => file.path === 'target-only.txt'));
+        const renamePreview = await loadComparisonFile(run, pr, 'renamed file.txt');
+        assert.ok(renamePreview.lines.some(line => line.text.includes('rename from original.txt')));
+        assert.equal((await loadComparisonFile(run, pr, 'binary.dat')).binary, true);
+        await assert.rejects(loadComparisonFile(run, pr, '../outside.txt'));
         const direct = await loadComparison(run, 'source', 'target', 'direct');
         assert.equal(direct.baseHash, direct.targetHash);
         assert.equal(direct.files.length, 4);
@@ -66,4 +71,18 @@ it('compares merge-base or exact tips without including target-only or uncommitt
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }
+});
+
+it('aligns replacement blocks while preserving each side and padding additions/deletions', () => {
+    const preview = parseDiffPreview('@@ -1,4 +1,5 @@\n same\n-old one\n-old two\n+new one\n+new two\n+new three\n tail\n', 100);
+    const rows = splitComparisonLines(preview.lines);
+    assert.equal(rows[0].note, '@@ -1,4 +1,5 @@');
+    assert.deepEqual(rows[2], { left: { line: 2, text: 'old one', changed: true }, right: { line: 2, text: 'new one', changed: true } });
+    assert.equal(rows[4].left, undefined);
+    assert.equal(rows[4].right?.text, 'new three');
+    assert.equal(rows[5].left?.line, 4);
+    assert.equal(rows[5].right?.line, 5);
+    const removed = splitComparisonLines(parseDiffPreview('@@ -1 +0,0 @@\n-gone\n', 100).lines);
+    assert.equal(removed[1].right, undefined);
+    assert.equal(removed[1].left?.text, 'gone');
 });

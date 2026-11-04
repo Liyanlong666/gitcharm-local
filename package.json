@@ -2,7 +2,7 @@
   "name": "git-charm",
   "displayName": "GitCharm — IDEA Git Log & Graph (Local)",
   "description": "%ext.description%",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "liugui",
   "icon": "resources/icon.png",
   "license": "MIT",
@@ -294,6 +294,11 @@
         "command": "idea-git.compareReferences",
         "title": "%cmd.compareReferences%",
         "category": "GitCharm"
+      },
+      {
+        "command": "idea-git.compareReferencesInPanel",
+        "title": "%cmd.compareReferencesInPanel%",
+        "category": "GitCharm"
       }
     ],
     "viewsContainers": {
@@ -499,6 +504,19 @@
           ],
           "default": "tracking",
           "description": "%config.defaultHistoryScope%"
+        },
+        "idea-git.comparisonLocation": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "panel"
+          ],
+          "default": "editor",
+          "enumDescriptions": [
+            "%config.comparisonLocation.editor%",
+            "%config.comparisonLocation.panel%"
+          ],
+          "description": "%config.comparisonLocation%"
         }
       }
     }

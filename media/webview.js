@@ -5464,7 +5464,7 @@ function openComparisonPath(path) {
 }
 
 ['btn-compare', 'cp-pick'].forEach(function (id) {
-    document.getElementById(id).addEventListener('click', function () {vscode.postMessage({ command: 'pickComparison' });});
+    document.getElementById(id).addEventListener('click', function () {vscode.postMessage({ command: 'pickComparison', location: id === 'cp-pick' ? 'panel' : undefined });});
 });
 document.getElementById('cp-close').addEventListener('click', closeComparison);
 document.getElementById('cp-pin').addEventListener('click', function () {

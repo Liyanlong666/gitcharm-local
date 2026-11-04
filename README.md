@@ -1,18 +1,20 @@
 # GitCharm Local
 
-个人维护的 GitCharm 定制版，基于 [Git0gui/gitcharm](https://github.com/Git0gui/gitcharm)，沿用 MIT 许可证和原作者版权声明。当前版本 **0.2.2**。本仓库不是上游官方发行渠道。
+个人维护的 GitCharm 定制版，基于 [Git0gui/gitcharm](https://github.com/Git0gui/gitcharm)，沿用 MIT 许可证和原作者版权声明。当前版本 **0.2.3**。本仓库不是上游官方发行渠道。
 
-A community customization of [GitCharm](https://github.com/Git0gui/gitcharm), retaining its MIT license and copyright notice. Version **0.2.2**; this is not the upstream Marketplace release.
+A community customization of [GitCharm](https://github.com/Git0gui/gitcharm), retaining its MIT license and copyright notice. Version **0.2.3**; this is not the upstream Marketplace release.
 
 ## 定制功能
 
-- **面板内比较**：工具栏「比较分支…」选择源与目标；右键另一条分支时，以当前分支为源。
+- **独立比较标签页（默认）**：工具栏「比较分支…」选择源与目标；右键另一条分支时，以当前分支为源。左侧文件树、右侧对齐的左右 Diff，支持路径筛选和逐文件浏览。
+- 同一仓库同一比较组合复用标签页，不同组合分别保留；底部提交图可继续独立浏览，切换仓库不影响已打开的比较。
+- 可用 `GitCharm: 在底部面板比较分支…` 保留原入口，或设置 `idea-git.comparisonLocation` 为 `panel`。默认值为 `editor`。
 - **PR 改动**：比较共同祖先到源分支；**版本差异**：直接比较目标到源版本。两种模式都不包含未提交内容，不自动 Fetch。
 - 明确显示比较基线、源/目标独有提交数、文件数及增删行数。比较期间固定提交号，点击刷新才重新读取分支端点。
-- 在文件树中单击预览，双击打开左右差异；支持重命名前后的路径。读取失败明确显示错误，不伪装为“没有差异”。
+- 文件树单击即在标签页内显示左右差异，双击或「打开完整 Diff」使用 VS Code 原生对比；支持重命名前后的路径。标签页对大文件限制展示行数并明确提示，完整内容可在原生 Diff 查看。读取失败明确显示错误。
 - 选中两条提交后右键「比较这两个版本」，与原有“汇总选中提交”口径分别提供。
-- 「固定」比较后，浏览其他提交不会覆盖它；关闭比较恢复提交详情。固定仅覆盖当前会话，不是跨重启保存比较组合。
-- 详情可放在**右侧或下方**，支持拖动尺寸并记住布局。
+- 可选的面板内比较仍支持「固定」；独立标签页天然与提交图的选择分离。本版不承诺重启后自动恢复比较标签页。
+- 可选的面板内比较仍支持详情放在**右侧或下方**，支持拖动尺寸并记住布局。
 - 保留本地＋实际跟踪分支组合视图、同步状态、单分支切换、全部分支入口，以及只 Fetch 不 pull 的刷新按钮和成功时间。
 
 ## 安装

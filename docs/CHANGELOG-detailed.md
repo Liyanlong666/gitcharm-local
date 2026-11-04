@@ -1,3 +1,11 @@
+## 0.2.3 (Local) — 2026-11-04
+
+- 新增 `ComparisonEditor` WebviewPanel，按仓库与源/目标组合复用，`retainContextWhenHidden` 保留当前文件和滚动；销毁时解除注册。`generation` 隔离快照，文件请求使用额外 ticket 防止乱序覆盖。
+- 标签页的所有 Git 读取绑定创建时的仓库；复用 `loadComparison` 的冻结端点，文件路径从快照白名单查找。原生 Diff 的二进制检测和内容 URI 也使用固定仓库。
+- `loadComparisonFile` 包含重命名两侧路径，复用现有 patch 解析；`splitComparisonLines` 按连续删除/新增块对齐左右行，保留各自行号并填充空侧，不声称行间语义等价。
+- 默认打开位置改为 `editor`，`idea-git.comparisonLocation=panel` 和显式面板命令保留旧入口；嵌入模式的刷新和口径切换不会意外跳成标签页。
+- 路径筛选和逐文件导航使用同一树形顺序；点击文件保留行 DOM。新增真实 Git 的文件读取/重命名/二进制验证和左右行对齐用例，配套生产 HTML 模板预览夹具。
+
 ## 0.2.2 (Local) — 2026-11-04
 
 - `comparison.ts` 通过注入的 `GitCommandRunner` 解析源/目标提交，一次冻结端点。PR 模式要求唯一 merge-base，直接模式使用目标 tip；文件与增删统计复用 `parseDiffTreeRawNumstat`。Git 失败向上传递。

@@ -1,5 +1,5 @@
 import { TrackingHistory } from '../services/trackingHistory';
-import { ComparisonMode, ComparisonSnapshot } from '../services/comparison';
+import { ComparisonLocation, ComparisonMode, ComparisonSnapshot, ComparisonSplitRow } from '../services/comparison';
 import { GraphCommit, CommitDetail, FileStat, LogFilters, StashEntry, ReflogEntry, RepositoryOption, WorktreeEntry } from '../services/gitService';
 import { FileIconPack } from '../services/fileIconTheme';
 import { DiffPreviewLine } from '../services/gitUtils';
@@ -337,11 +337,22 @@ export type WebviewToExtMessage =
     | { command: 'pushDialogFileDiff'; hash: string; path: string }
     | { command: 'getCommitFilesForPush'; hash: string }
     | { command: 'getPushAllFiles' }
-    | { command: 'pickComparison' }
+    | { command: 'pickComparison'; location?: ComparisonLocation }
     | { command: 'updateComparison'; id: number; mode: ComparisonMode; swap?: boolean }
     | { command: 'closeComparison' }
     | { command: 'openComparisonFile'; id: number; path: string }
     | { command: 'previewComparisonFile'; id: number; requestId: number; path: string };
+
+/** Independent editor protocol; generations identify snapshots, requestId identifies file selection. */
+export type ComparisonEditorMessage =
+    | { command: 'ready' | 'refresh' | 'swap' }
+    | { command: 'changeMode'; mode: ComparisonMode }
+    | { command: 'selectFile'; generation: number; path: string; requestId: number }
+    | { command: 'openNativeDiff'; generation: number; path: string };
+
+export type ComparisonEditorResponse =
+    | { command: 'comparison'; generation: number; source: string; target: string; mode: ComparisonMode; snapshot?: ComparisonSnapshot; error?: string }
+    | { command: 'file'; generation: number; requestId: number; path: string; rows?: ComparisonSplitRow[]; binary?: boolean; truncated?: boolean; error?: string };
 
 /**
  * Line history panel protocol (the editor tab opened by Alt+H).

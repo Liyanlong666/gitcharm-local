@@ -14,6 +14,14 @@ export type Locale = 'zh-cn' | 'en';
 export type I18nParams = Record<string, string | number>;
 
 const zh: Record<string, string> = {
+    "comparison.filterFiles": "筛选文件路径…",
+    "comparison.resizeFiles": "调整文件列表宽度",
+    "comparison.previousFile": "上一个文件",
+    "comparison.nextFile": "下一个文件",
+    "comparison.fullDiff": "打开完整 Diff",
+    "comparison.truncated": "差异较大，此处仅展示部分上下文；请打开完整 Diff 查看全部内容。",
+    "comparison.fileNotInSnapshot": "所选文件不属于当前比较结果。",
+    "comparison.noMatchingFiles": "没有匹配的文件",
     "comparison.open": "比较分支…",
     "comparison.title": "分支与版本比较",
     "comparison.change": "选择分支",
@@ -820,6 +828,14 @@ const zh: Record<string, string> = {
 };
 
 const en: Record<string, string> = {
+    "comparison.filterFiles": "Filter file paths…",
+    "comparison.resizeFiles": "Resize file list",
+    "comparison.previousFile": "Previous file",
+    "comparison.nextFile": "Next file",
+    "comparison.fullDiff": "Open full diff",
+    "comparison.truncated": "This view shows a limited portion of the patch. Open full diff to see all content.",
+    "comparison.fileNotInSnapshot": "The selected file is not part of this comparison.",
+    "comparison.noMatchingFiles": "No matching files",
     "comparison.open": "Compare Branches…",
     "comparison.title": "Compare branches & revisions",
     "comparison.change": "Choose branches",

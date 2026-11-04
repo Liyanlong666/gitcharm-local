@@ -526,6 +526,10 @@ export function registerBranchCommands(
             }
         }),
 
+        vscode.commands.registerCommand('idea-git.compareReferencesInPanel', async () => {
+            await graphView.pickComparison('panel');
+        }),
+
         vscode.commands.registerCommand('idea-git.compareReferences', async () => {
             await graphView.pickComparison();
         }),

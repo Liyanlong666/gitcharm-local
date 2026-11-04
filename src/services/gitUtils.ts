@@ -793,6 +793,125 @@ export function remoteNameFromUpstream(upstream: string | undefined): string | u
     return slash > 0 ? text.slice(0, slash) : undefined;
 }
 
+/**
+ * Tag badges come before branch badges in a commit row. A tag is the release
+ * marker people scan for, while the branch chips on the same commit are often
+ * just `main` / `origin/main` and would otherwise push the tag out of the
+ * visible part of the refs column. Order is decided once on the host so rows,
+ * tooltips and cached pages all agree.
+ */
+export function refsTagsFirst(refs: readonly string[], tags: readonly string[]): string[] {
+    if (tags.length === 0 || refs.length < 2) {return [...refs];}
+    const tagged = new Set(tags);
+    return [...refs.filter(r => tagged.has(r)), ...refs.filter(r => !tagged.has(r))];
+}
+
+/** A tag as `git ls-remote --tags` reports it. */
+export interface RemoteTagRef {
+    name: string;
+    /** Commit the tag resolves to: annotated tags are peeled, because that is
+     *  what the local ref reader stores and what a badge names. */
+    commit: string;
+}
+
+/**
+ * Parse `git ls-remote --tags` output. An annotated tag appears twice — the
+ * tag object and its peeled `^{}` commit — and only the pair together says
+ * which commit the tag names, so the two lines are merged by tag name.
+ * Symbolic and non-tag refs are dropped; remote listings are not ours to trust.
+ */
+export function parseLsRemoteTags(output: string): RemoteTagRef[] {
+    const direct = new Map<string, string>();
+    const peeled = new Map<string, string>();
+    for (const line of output.split('\n')) {
+        const tab = line.indexOf('\t');
+        if (tab <= 0) {continue;}
+        const hash = line.slice(0, tab).trim();
+        const ref = line.slice(tab + 1).trim();
+        if (!/^[0-9a-f]{40,64}$/i.test(hash) || !ref.startsWith('refs/tags/')) {continue;}
+        const name = ref.slice('refs/tags/'.length);
+        if (ref.endsWith('^{}')) {
+            peeled.set(name.slice(0, -3), hash);
+        } else {
+            direct.set(name, hash);
+        }
+    }
+    return [...direct]
+        .map(([name, hash]) => ({ name, commit: peeled.get(name) ?? hash }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Parse `git for-each-ref refs/tags --format=%(objectname)%09%(*objectname)%09%(refname:short)`.
+ * `%(*objectname)` is the commit an annotated tag peels to and empty for a
+ * lightweight tag, whose object name already is the commit.
+ */
+export function parseTagRefList(output: string): Map<string, string> {
+    const hashRe = /^[0-9a-f]{40,64}$/i;
+    const tags = new Map<string, string>();
+    for (const line of output.split('\n')) {
+        if (!line) {continue;}
+        const [object, peeled, name] = line.split('\t');
+        if (!name || !hashRe.test(object ?? '')) {continue;}
+        tags.set(name, peeled && hashRe.test(peeled) ? peeled : object);
+    }
+    return tags;
+}
+
+/**
+ * `for-each-ref --contains <hash> --format=%(refname)` lines into branch names,
+ * local ones before remote ones. for-each-ref sorts the two namespaces together,
+ * so `refs/heads/x` and `refs/remotes/origin/x` interleave by name; a rooted
+ * commit list wants the developer's own branch when it has one. `<remote>/HEAD`
+ * is the symbolic default branch, not a line of history, so it is left out.
+ */
+export function parseContainingBranchRefs(output: string): string[] {
+    const local: string[] = [];
+    const remote: string[] = [];
+    for (const line of output.split('\n')) {
+        const ref = line.trim();
+        if (ref.startsWith('refs/heads/')) {
+            local.push(ref.substring('refs/heads/'.length));
+        } else if (ref.startsWith('refs/remotes/')) {
+            const name = ref.substring('refs/remotes/'.length);
+            if (name && !name.endsWith('/HEAD')) {remote.push(name);}
+        }
+    }
+    return [...local, ...remote];
+}
+
+/** How local tags differ from the remote's, by tag name. */
+export interface TagDiff {
+    /** On the remote, absent locally — deleted here, or never fetched. */
+    remoteOnly: string[];
+    /** Local tags the remote does not have. */
+    localOnly: string[];
+    /** Same name on both sides, different commits (a tag was re-made). */
+    different: string[];
+}
+
+/** `local` maps tag name → commit, exactly what `GitService.getTagRefs` returns. */
+export function diffTagRefs(local: ReadonlyMap<string, string>, remote: readonly RemoteTagRef[]): TagDiff {
+    const remoteCommits = new Map(remote.map(tag => [tag.name, tag.commit]));
+    const remoteOnly: string[] = [];
+    const different: string[] = [];
+    for (const [name, commit] of remoteCommits) {
+        const mine = local.get(name);
+        if (mine === undefined) {
+            remoteOnly.push(name);
+        } else if (mine !== commit) {
+            different.push(name);
+        }
+    }
+    const localOnly = [...local.keys()].filter(name => !remoteCommits.has(name));
+    const byName = (a: string, b: string) => a.localeCompare(b);
+    return {
+        remoteOnly: remoteOnly.sort(byName),
+        localOnly: localOnly.sort(byName),
+        different: different.sort(byName)
+    };
+}
+
 export interface RemoteBranchMatch {
     remote: string;
     /** The remote-tracking ref as listed by the repository, e.g. `fork/dev/x`. */
@@ -1039,6 +1158,25 @@ export function formatGitError(error: unknown, maxLines = 4, maxLength = 400): s
     if (lines.length === 0) {return '';}
     const text = lines.join(' ');
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+/**
+ * The `.lock` file git refused to create, or undefined when the failure has
+ * nothing to do with one.
+ *
+ * Closing the editor while a checkout is still running leaves `index.lock` (or
+ * a ref lock) behind, and every later write keeps failing with the same message
+ * until somebody deletes it. Git names the file in both wordings it uses:
+ *   fatal: Unable to create 'D:/repo/.git/index.lock': File exists.
+ *   error: cannot lock ref 'refs/heads/x': Unable to create '…/x.lock': File exists.
+ * so one pattern covers them. Greedy up to the last `':` on the line keeps the
+ * whole path even when it contains quotes. This is data, never a command: the
+ * caller still has to prove the path sits inside the repository.
+ */
+export function findStaleLock(text: string | undefined): string | undefined {
+    if (!text) {return undefined;}
+    const match = /Unable to create '(.*)':/.exec(text);
+    return match ? match[1] : undefined;
 }
 
 /** The actionable half of a remote failure: what to do about it. */

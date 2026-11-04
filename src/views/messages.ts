@@ -2,6 +2,7 @@ import { TrackingHistory } from '../services/trackingHistory';
 import { GraphCommit, CommitDetail, FileStat, LogFilters, StashEntry, ReflogEntry, RepositoryOption, WorktreeEntry } from '../services/gitService';
 import { FileIconPack } from '../services/fileIconTheme';
 import { DiffPreviewLine } from '../services/gitUtils';
+import { DiffRow, LineHistoryCommit } from '../services/lineHistory';
 
 /**
  * Message protocol between the extension host and the graph webview.
@@ -63,6 +64,29 @@ export interface HistoryFetchState {
     target?: string;
     lastSucceededAt?: number;
     failed?: boolean;
+}
+
+/**
+ * One tag whose local and remote state disagree, as shown in the remote-tag
+ * dialog. Hashes are full; the webview shortens them for display.
+ */
+export interface TagSyncRow {
+    name: string;
+    /** `inSync` rows have no default action — they are what the differences-only
+     *  filter hides — but can still be deleted on either side. */
+    state: 'remoteOnly' | 'localOnly' | 'different' | 'inSync';
+    /** Commit the local tag resolves to; absent when only the remote has it. */
+    localHash?: string;
+    /** Commit the remote tag resolves to; absent when only the local has it. */
+    remoteHash?: string;
+}
+
+/** `keep` is an explicit "leave the local tag alone"; nothing is run for it. */
+export type TagSyncOperation = 'keep' | 'pull' | 'pullForce' | 'push' | 'deleteRemote' | 'deleteLocal';
+
+export interface TagSyncDecision {
+    name: string;
+    action: TagSyncOperation;
 }
 
 /** Messages sent from the extension host to the webview. */
@@ -143,6 +167,9 @@ export type ExtToWebviewMessage =
         files: FileStat[];
         /** Subset of `files` that still exists in the current working tree. */
         existingPaths: string[];
+        /** `tagSync` means the third panel is showing a commit picked in the
+         *  tag-diff dialog, not the row selected in the log. */
+        origin?: 'tagSync';
     }
     | {
         command: 'filePreviewResponse';
@@ -192,6 +219,13 @@ export type ExtToWebviewMessage =
         /** All configured remotes; more than one turns the dialog's picker on. */
         remotes: string[];
     }
+    | {
+        command: 'showTagSyncDialog';
+        remote: string;
+        rows: TagSyncRow[];
+        /** No remote to act on: the table is a viewer, so nothing is selectable. */
+        readOnly?: boolean;
+    }
     | { command: 'pushFilesResponse'; hash: string; files: Array<{ path: string; status: string }> }
     | {
         command: 'showFileHistory';
@@ -227,7 +261,7 @@ export type WebviewAction =
     | 'commit' | 'rename' | 'deleteBranch' | 'newBranchFrom' | 'compareBranch'
     | 'showDiff' | 'cherryPick' | 'reset' | 'dropCommit' | 'squashCommits' | 'interactiveRebase' | 'editMessage'
     | 'revert' | 'amend' | 'openRemoteCommit' | 'openRemoteBranch'
-    | 'newTag' | 'deleteTag' | 'pushTag'
+    | 'newTag' | 'deleteTag' | 'deleteTags' | 'pushTag' | 'pushAllTags' | 'pickPushTags' | 'remoteTags'
     | 'toggleFavorite'
     | 'stashSave' | 'stashApply' | 'stashPop' | 'stashDrop'
     | 'worktreeAdd' | 'worktreeOpen' | 'worktreeRemove'
@@ -274,6 +308,8 @@ export type WebviewToExtMessage =
         hash?: string;
         hashes?: string[];
         path?: string;
+        /** Single tag a badge right-click asked about (`pushTag` / `deleteTag`). */
+        tag?: string;
         remainingHashes?: string[];
         /** Stash stack position (`stash@{n}`), for the stash tree section's actions. */
         stash?: number;
@@ -285,6 +321,10 @@ export type WebviewToExtMessage =
     | { command: 'saveViewState'; state: PersistedViewState }
     | { command: 'pushDialogAction'; action: string; force?: boolean }
     | { command: 'pushDialogRemote'; remote: string }
+    | { command: 'tagSyncConfirm'; items?: TagSyncDecision[] }
+    /** A local/remote hash clicked in the tag-diff dialog: show it in the
+     *  third column, with the same detail UI as a selected commit. */
+    | { command: 'tagSyncCommit'; hash: string }
     | { command: 'manageRemotes' }
     | { command: 'pushDialogFileDiff'; hash: string; path: string }
     | { command: 'getCommitFilesForPush'; hash: string }
@@ -293,3 +333,58 @@ export type WebviewToExtMessage =
     | { command: 'getCompareAllFiles' }
     | { command: 'compareFileDiff'; hash: string; path: string }
     | { command: 'compareDialogClosed' };
+
+/**
+ * Line history panel protocol (the editor tab opened by Alt+H).
+ *
+ * The host owns the blame walk and the per-commit patches; the webview only
+ * renders what it is handed. `requestId` lets the webview drop a patch that
+ * arrives after the user already picked another commit — clicking through a
+ * list faster than git answers is the normal case, not an edge case.
+ */
+export type LineHistoryExtMessage =
+    | { command: 'lh.loading'; mode: 'lines' | 'file' }
+    | {
+        command: 'lh.data';
+        /** Which tab this is: selected lines (Alt+H) or the whole file. */
+        mode: 'lines' | 'file';
+        /** Repository-relative path the selection belongs to. */
+        file: string;
+        /** 0-based inclusive line range the blame walk covered. */
+        startLine: number;
+        endLine: number;
+        commits: LineHistoryCommit[];
+        /** Selected lines with no commit yet (edited in the worktree). */
+        skipped: number;
+        /** Lines the selection covers. */
+        scanned: number;
+        /** Set instead of commits when the walk itself failed. */
+        error?: string;
+    }
+    | {
+        /**
+         * The `-L` chain landed after the blame list: the same rows enriched
+         * with older rewrites and each revision's content. Sent as its own
+         * message so the first paint never waits for the walk.
+         */
+        command: 'lh.chain';
+        commits: LineHistoryCommit[];
+    }
+    | {
+        command: 'lh.diff';
+        hash: string;
+        requestId: number;
+        /** Whether the rows cover the whole file change or only the selected lines. */
+        full: boolean;
+        rows: DiffRow[];
+        truncated: boolean;
+        binary: boolean;
+        error?: string;
+    };
+
+export type LineHistoryWebviewMessage =
+    | { command: 'ready' }
+    | { command: 'selectCommit'; hash: string; requestId: number; full: boolean }
+    | { command: 'openNativeDiff'; hash: string }
+    | { command: 'revealCommit'; hash: string }
+    | { command: 'refresh' };

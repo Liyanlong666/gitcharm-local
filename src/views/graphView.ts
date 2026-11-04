@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { GitService, GraphCommit, FileStat, LogFilters, ReflogEntry, PushPreview, BranchDetails } from '../services/gitService';
-import { ExtToWebviewMessage, HistoryFetchState, OperationKind, PersistedViewState, RepoUiState, WebviewToExtMessage } from './messages';
+import { ExtToWebviewMessage, HistoryFetchState, OperationKind, PersistedViewState, RepoUiState, TagSyncDecision, TagSyncRow, WebviewToExtMessage } from './messages';
 import { logger } from '../services/logger';
 import { getFileIconPack, iconThemeResourceRoot, invalidateFileIconCache } from '../services/fileIcons';
 import { resolveGitDir } from '../services/gitPaths';
@@ -88,8 +88,19 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * rooting by itself (see `_listRev`). `above` counts the descendants already
      * painted above the commit, `after` how many exist in total, so upward
      * paging knows which slice to ask for next.
+     *
+     * `up` is which ref those descendants are walked from — see `_rootUpScope`.
+     * It is a promise created with the root so that every load racing with this
+     * reveal awaits the same answer instead of one of them seeing an unresolved
+     * scope and painting the commit with nothing above it.
      */
-    private _revRoot: { rev: string; branch: string | undefined; above: number; after: number } | undefined;
+    private _revRoot: {
+        rev: string;
+        branch: string | undefined;
+        up: Promise<string | undefined>;
+        above: number;
+        after: number;
+    } | undefined;
     private _pendingReveal: { hash: string; file?: string } | undefined;
     /**
      * Bumped by every query that repaints the whole commit list. Focusing the
@@ -237,7 +248,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         // Rooted before the first await: focusing the view can start its own
         // first load in this very tick, and a page fetched against the branch
         // tip would paint over the reveal and leave the commit off-screen.
-        this._revRoot = { rev: hash, branch: this._branch, above: 0, after: 0 };
+        this._setRoot(hash);
         if (!this._view || !this._webviewReady) {
             // A hidden view has destroyed its DOM; the reveal is replayed after
             // the next 'ready' handshake instead of into a dead frame.
@@ -246,6 +257,46 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
         }
 
         void this._revealFrom(hash, file);
+    }
+
+    /** Root the list at `rev`, under the scope currently shown. */
+    private _setRoot(rev: string): void {
+        this._revRoot = { rev, branch: this._branch, up: this._rootUpScope(rev), above: 0, after: 0 };
+    }
+
+    /**
+     * Which ref the rows *above* a revealed commit are walked from. They have to
+     * be that commit's own descendants, so the ref must contain it — and the
+     * scope the panel happens to be on is a perfectly ordinary way of not
+     * containing it: blame reports commits for the checked-out branch while the
+     * list may be pointed at another one, or at 「全部分支」. Walking such a scope
+     * makes `rev-list <scope> --not <commit>` answer with the whole of it, so
+     * every row above the commit belongs to a different line of history
+     * (measured: revealing the tip of v0.1.7/conflict-orientation-hint while the
+     * panel sat on HEAD answered 33, and those 33 were HEAD's own commits).
+     *
+     * So: the branch the panel is showing, else the checked-out branch, else the
+     * first branch that does contain it. Nothing only when no branch contains it
+     * — a tag-only or dangling commit — and then the list has nothing above it,
+     * which is the truth. The panel's own scope is kept for the older-git path
+     * where the containing scan is unavailable, so a failed probe never takes
+     * away rows the user scrolled up to see.
+     */
+    private async _rootUpScope(rev: string): Promise<string | undefined> {
+        try {
+            const candidates: string[] = [];
+            if (this._branch) {candidates.push(this._branch);}
+            const current = await this._gitService.getCurrentBranch();
+            if (current && current !== this._branch) {candidates.push(current);}
+            for (const candidate of candidates) {
+                if (await this._gitService.isAncestorOf(rev, candidate)) {return candidate;}
+            }
+            const containing = await this._gitService.getBranchesContaining(rev);
+            return containing ? containing[0] : this._branch;
+        } catch (error) {
+            logger.debug(`[GitCharm] up-scope probe failed for ${rev.substring(0, 12)}: ${formatGitError(error)}`);
+            return this._branch;
+        }
     }
 
     /**
@@ -272,7 +323,12 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
-            this._revRoot = { rev: targetHash, branch: this._branch, above: 0, after: 0 };
+            // Re-root only when the scope moved since revealCommit claimed it:
+            // `_collect` below re-seeds `above`/`after` either way, and building a
+            // second root would run the up-scope probe twice.
+            if (!this._revRoot || this._revRoot.rev !== targetHash || this._revRoot.branch !== this._branch) {
+                this._setRoot(targetHash);
+            }
             const payload = await this._collect(true, ticket);
             if (!payload) {return;}
             this._post({ command: 'setData', ...payload });
@@ -756,23 +812,40 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * Returns the selected action or undefined if dismissed.
      */
     showDialog(message: string, actions: string[], type: 'warn' | 'info' | 'error' = 'warn'): Promise<string | undefined> {
+        const view = this._view;
+        if (!view) {return Promise.resolve(undefined);}
+        // Command palette can run a command whose dialog would land in a hidden
+        // view, where the frame (and the dialog with it) does not exist. Ask in a
+        // native modal instead: buffering it would wait for a panel the user has
+        // no reason to open.
+        if (!view.visible) {
+            const options: vscode.MessageOptions = { modal: true };
+            const ask = (msg: string): Thenable<string | undefined> =>
+                type === 'error' ? vscode.window.showErrorMessage(msg, options, ...actions)
+                : type === 'info' ? vscode.window.showInformationMessage(msg, options, ...actions)
+                : vscode.window.showWarningMessage(msg, options, ...actions);
+            return Promise.resolve(ask(message));
+        }
         return new Promise((resolve) => {
-            if (!this._view) {
-                resolve(undefined);
-                return;
-            }
-            const handler = this._view.webview.onDidReceiveMessage((msg: WebviewToExtMessage) => {
-                if (msg.command === 'dialogAction') {
-                    handler.dispose();
-                    resolve(msg.action);
-                }
-            });
+            const subscriptions: vscode.Disposable[] = [];
+            let settled = false;
+            const settle = (action?: string) => {
+                if (settled) {return;}
+                settled = true;
+                while (subscriptions.length > 0) {subscriptions.pop()?.dispose();}
+                resolve(action);
+            };
+            subscriptions.push(view.webview.onDidReceiveMessage((msg: WebviewToExtMessage) => {
+                if (msg.command === 'dialogAction') {settle(msg.action);}
+            }));
+            // Hiding the panel destroys the dialog's DOM, so an answer can never
+            // arrive — settle then instead of on a clock, which used to leave a
+            // dialog on screen whose buttons were already dead.
+            subscriptions.push(view.onDidChangeVisibility(() => {
+                if (!view.visible) {settle(undefined);}
+            }));
+            subscriptions.push(view.onDidDispose(() => settle(undefined)));
             this._post({ command: 'showDialog', message, actions, type });
-            // Fallback: resolve after 30s in case user closes panel
-            setTimeout(() => {
-                handler.dispose();
-                resolve(undefined);
-            }, 30000);
         });
     }
 
@@ -919,6 +992,39 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             }));
             subscriptions.push(view.onDidDispose(() => settle(undefined)));
             postDialog(preview);
+        });
+    }
+
+    /**
+     * Show the local-vs-remote tag table and resolve with the rows the user
+     * chose to act on. An empty array means "nothing selected"; undefined means
+     * the dialog was dismissed or the view disappeared under it. Like the push
+     * dialog, the listener lives until it settles — a dialog left open stays
+     * usable, and losing the view settles it so the command never hangs.
+     */
+    showTagSyncDialog(remote: string, rows: TagSyncRow[], readOnly = false): Promise<TagSyncDecision[] | undefined> {
+        return new Promise((resolve) => {
+            const view = this._view;
+            if (!view) {
+                resolve(undefined);
+                return;
+            }
+            const subscriptions: vscode.Disposable[] = [];
+            let settled = false;
+            const settle = (items?: TagSyncDecision[]) => {
+                if (settled) {return;}
+                settled = true;
+                while (subscriptions.length > 0) {subscriptions.pop()?.dispose();}
+                resolve(items);
+            };
+            subscriptions.push(view.webview.onDidReceiveMessage((msg: WebviewToExtMessage) => {
+                if (msg.command === 'tagSyncConfirm') {settle(msg.items ?? []);}
+            }));
+            subscriptions.push(view.onDidChangeVisibility(() => {
+                if (!view.visible) {settle(undefined);}
+            }));
+            subscriptions.push(view.onDidDispose(() => settle(undefined)));
+            this._post({ command: 'showTagSyncDialog', remote, rows, readOnly });
         });
     }
 
@@ -1299,6 +1405,37 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                         });
                     } catch (error) {
                         vscode.window.showErrorMessage(t('view.loadDetailFailed', { error: formatGitError(error) }));
+                    } finally {
+                        this._postLoading('detail', false);
+                    }
+                    break;
+                case 'tagSyncCommit':
+                    // Same detail UI as a selected row, but the log selection
+                    // stays where it is: `origin` tells the webview to accept
+                    // the payload without a matching selected hash.
+                    this._postLoading('detail', true);
+                    try {
+                        const [commit, files] = await Promise.all([
+                            this._gitService.getCommitDetail(message.hash),
+                            this._gitService.getCommitFilesWithStats(message.hash)
+                        ]);
+                        this._post({
+                            command: 'setDetail',
+                            origin: 'tagSync',
+                            commit,
+                            files,
+                            existingPaths: await this._existingWorkingPaths(files)
+                        });
+                    } catch (error) {
+                        // A remote-only tag can point at a commit that was never
+                        // fetched; "bad object" is the expected answer there, not
+                        // a broken repository, so it gets its own next step.
+                        const text = error instanceof Error ? error.message : String(error);
+                        if (/bad object|unknown revision|not a valid object/i.test(text)) {
+                            vscode.window.showWarningMessage(t('tag.commitNotLocal'));
+                        } else {
+                            vscode.window.showErrorMessage(t('view.loadDetailFailed', { error: formatGitError(error) }));
+                        }
                     } finally {
                         this._postLoading('detail', false);
                     }
@@ -1938,10 +2075,25 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                     await vscode.commands.executeCommand('idea-git.createTag', commitNode);
                     return;
                 case 'deleteTag':
-                    await vscode.commands.executeCommand('idea-git.deleteTag', commitNode);
+                    await vscode.commands.executeCommand('idea-git.deleteTag', message.tag ? { ...commitNode, tag: message.tag } : commitNode);
                     return;
                 case 'pushTag':
-                    await vscode.commands.executeCommand('idea-git.pushTag', commitNode);
+                    await vscode.commands.executeCommand('idea-git.pushTag', message.tag ? { ...commitNode, tag: message.tag } : commitNode);
+                    return;
+                case 'pushAllTags':
+                    await vscode.commands.executeCommand('idea-git.pushAllTags');
+                    return;
+                case 'deleteTags':
+                    // No node: the command opens the tag picker itself.
+                    await vscode.commands.executeCommand('idea-git.deleteTags');
+                    return;
+                case 'pickPushTags':
+                    // No node means "every tag in the repository", which opens the
+                    // quick pick instead of pushing anything directly.
+                    await vscode.commands.executeCommand('idea-git.pushTag', undefined);
+                    return;
+                case 'remoteTags':
+                    await vscode.commands.executeCommand('idea-git.remoteTags');
                     return;
                 case 'toggleFavorite': {
                     // A mark on the tree, not on git: nothing to reload, and the
@@ -2127,18 +2279,21 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
      * *end* of the descendant range: the count comes first, then `--skip` lands
      * on it. The result is newest → oldest, i.e. exactly the order the rows sit
      * above the commit.
+     * The normal tracking view's two roots do not apply here: only the resolved
+     * containing branch is used, so the other branch cannot add unrelated rows.
      */
-    private async _rootedDescendants(force: boolean, revisions?: string[]): Promise<{ commits: GraphCommit[]; above: number; after: number }> {
+    private async _rootedDescendants(force: boolean): Promise<{ commits: GraphCommit[]; above: number; after: number }> {
         const root = this._revRoot;
         if (!root) {return { commits: [], above: 0, after: 0 };}
-        const after = await this._gitService.countCommitsAfter(root.rev, root.branch, revisions);
+        const up = await root.up;
+        if (!up) {return { commits: [], above: 0, after: 0 };}
+        const after = await this._gitService.countCommitsAfter(root.rev, up);
         const want = Math.min(GraphViewProvider.REVEAL_SIDE, after);
         if (want === 0) {return { commits: [], above: 0, after };}
         const data = await this._gitService.getCommitGraphData({
             limit: want,
             skip: after - want,
-            branch: root.branch,
-            revisions,
+            branch: up,
             excludeAncestorsOf: root.rev,
             force
         });
@@ -2170,7 +2325,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             }),
             // Two extra spawns, and only while the list is rooted.
             rooted
-                ? this._rootedDescendants(force, revisions)
+                ? this._rootedDescendants(force)
                 : Promise.resolve({ commits: [] as GraphCommit[], above: 0, after: 0 })
         ]);
         return {
@@ -2324,7 +2479,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             }
             const remaining = root.after - root.above;
             const limit = Math.min(GraphViewProvider.PAGE_MORE, remaining);
-            if (limit <= 0) {
+            // The same ref the count came from — `after` and `--skip` are two
+            // halves of one walk, so a different scope here would page in rows
+            // from another history or leave a hole above the first window.
+            const up = await root.up;
+            if (!up || limit <= 0) {
                 this._hasMoreAbove = false;
                 this._post({ command: 'prependCommits', commits: [], hasMoreAbove: false });
                 return;
@@ -2332,8 +2491,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
             const data = await this._gitService.getCommitGraphData({
                 limit,
                 skip: Math.max(0, remaining - limit),
-                branch: root.branch,
-                revisions: this._historyRevisions,
+                branch: up,
                 excludeAncestorsOf: root.rev
             });
             // The root or the list changed while the chunk was loading.
@@ -2562,6 +2720,9 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
                 </button>
                 <button class="col-refresh no-spin" id="stash-save" title="${t('ui.stashSave')}">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 2.8h12v2.4H2z"/><path d="M3.2 5.2V13h9.6V5.2"/><path d="M6.4 8.1h3.2"/></svg>
+                </button>
+                <button class="col-refresh no-spin" id="tag-push" title="${t('ui.tags')}">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M2 2h5l7 7-5 5-7-7z"/><circle cx="4.6" cy="4.6" r="1"/></svg>
                 </button>
                 <button class="col-refresh" id="rf-branch" title="${t('ui.refreshBranches')}">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 1.5v3h-3"/></svg>

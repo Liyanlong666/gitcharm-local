@@ -1,3 +1,12 @@
+## 0.2.1 (Local) — 2026-11-04
+
+- 合并上游 `18afc2b`（0.2.0），本地定制基线保存为 `baaea5d`（0.1.12）。仅本地构建，不发布市场或推送远程。
+- 普通历史查询保留 `trackingHistory` 解析的固定提交端点；全部分支复用上游 `ALL_BRANCHES_SCOPE`（`--branches --remotes`），避免标签独占、stash 和内部引用污染列表。
+- blame 定位的向上分页使用上游 `_rootUpScope` 解析出的包含目标提交的分支；不再把组合视图的两端传给该上下文查询，计数和分页均使用同一个 `up`。
+- `selectAllBranches` 改发显式 `showAllBranches` 消息，并按 `historyMode` 判断重复点击、高亮和跨分支搜索入口，解决空 `selectedBranch` 同时表示默认跟踪视图带来的冲突。
+- `_execNetwork` 在凭据提示前固定仓库，`_execWithLockRecovery` 的首试、锁路径校验和重试沿用同一个仓库，保留确认后仅重试一次的约束。
+- 保留 `refsReader` 的 loose ref 优先级和历史签名、trackInfo 失效代数、本地首次展示/刷新竞态修复；新增一项针对默认跟踪视图切换全部分支的行为验证。
+
 ## 0.1.12 (Local) — 2026-10-31
 
 - btn-history-mode 复用原有工具栏按钮的尺寸、边框、圆角与悬停样式，单分支/组合图标改用固定 SVG，无图标字体依赖。
@@ -36,6 +45,111 @@
 # 更新日志（详细版）
 
 面向维护者：保留踩坑细节、实测数据与文件路径。随 VSIX 发布、市场页展示的简明版是 `CHANGELOG.md`；本文件位于 `docs/`，不进 VSIX。
+
+## [0.2.0] - 2026-11-02
+
+本版全部来自 0.1.9 的实机反馈：三处修复（「全部分支」的范围、blame 跳转后上翻页串线、窄行里整块消失的徽章）加一处排版收紧（徽章列上限 45% → 20%）。三处的共同点是"数据本身没错，是取数据的范围画错了"——所以每条都配了源码断言级回归测试。
+
+### 变更
+
+- **提交行徽章列上限 45% → 20%**（`media/webview.css` 的 `.refs`）：这个百分比按 CSS 解析的是 `.msgline` 的宽度，不是整行。实测（预览 harness，同一批 mock 行）700px 行宽下长分支名徽章 117px → 97px（名字只剩约 7 个字符），1180px 行宽下短名徽章仍然完整；徽章始终落在行的可视区内（`clipped` 恒为 −8px，即行的 `margin-right`）。`+N` 计数在行宽 ≥480px 时完整可见，330px 及以下会被裁掉尾巴——这在 45% 时同样存在（那时是 260px 起），完整列表由 `.refs-popover` 兜底。
+
+### 修复
+
+- **「全部分支」的提交范围是 `--branches --remotes`，不是 `--all`**（`ALL_BRANCHES_SCOPE`，`src/services/gitService.ts` 的 `buildArgs` 与 `countCommitsAfter`）：`--all` 说的是 `refs/` 底下每一个 ref，于是标签独占的提交、`refs/stash`、以及 agent 宿主写在 `refs/agents/<session>/checkpoints/turn/N` 的检查点提交全都涌进列表。实测本仓库 `--all` 201 行、`--branches --remotes` 198 行，多出的 3 行永远拿不到徽章（分支列表与 ref 装饰只读 `refs/heads|remotes|tags`），左侧树里也没有对应行，看起来就是"提交历史莫名其妙"。两处必须同一个范围：rooted 窗口的 `--skip` 是按 `countCommitsAfter` 从尾段倒着算的，计数走 `--all`、列表走 branches+remotes 就会在中间留一段空洞。空仓库这条 argv 同样安全（`git log --branches --remotes` exit 0 空输出；加 `HEAD` 就会在 unborn 分支上 fatal）。
+- **blame 跳转后向上翻页读的是"确实包含这条提交的那一条 ref"**（`_rootUpScope()` + `_revRoot.up`，`src/views/graphView.ts`）：上半段原先按面板当前的 rev 范围查，两种错法——默认「全部分支」下那是"一切分支的后代集合"，别的分支的提交会混进来；面板停在不含这条提交的分支时，`rev-list <scope> --not <提交>` 直接回答"整个 scope"（实测 33 条外来提交 vs 应为 0），现象就是"往上翻着翻着又冒出一段时间线"。取值顺序：面板当前分支 → 检出的分支（`getCurrentBranch`，blame 走的就是它）→ `for-each-ref --contains` 扫到的第一个分支（本地名排在远程名前，`parseContainingBranchRefs`）→ 都没有就当上面没有提交（标签独占 / 悬空提交的真答案）。`up` 与 root 一起创建、作为 promise 存在 `_revRoot` 上，`_rootedDescendants`（算 `after`）与 `_loadMoreUp`（算 `skip`）共用同一个解析结果——reveal 与聚焦触发的加载会同时在跑，各算一份就会有一边把上面那段画丢。老 git 没有 `for-each-ref --contains` 时 `getBranchesContaining` 返回 undefined，退回"按面板分支"，退路不反过来把行吃掉。
+- **徽章不再被整块裁出可视区**（`media/webview.css` + `media/webview.js` 的 `refChipHtml`）：徽章列曾 `flex: none` 且不限宽，实测行宽 480px 起溢出 72.6px、260px 溢出 292.6px，行的 `overflow: hidden` 把整块徽章连 `+N` 一起裁掉；图列关闭时另有 `#rows.no-refs .refs { display: none }` 直接藏掉徽章。现在 `.msg` 是 `flex: 1 1 0; min-width: 0`（吃剩余并优先出省略号），`.refs` 是 `flex: 0 0 auto` + `max-width: 20%`，省略号只切新加的 `.chip-name`，`.chip-more` `flex: none` 永不参与收缩，`no-refs` 那条规则删除——"这个提交在哪个分支上"不能因为隐藏图列就没有答案。
+
+### 测试
+
+- 新增 `src/test/logScopeAndRow.test.ts`（源码断言，因为这几处都住在 import vscode 的模块里）：钉住 `ALL_BRANCHES_SCOPE` 的字面值、`buildArgs` 与 `countCommitsAfter` 里不再出现 `--all`、向上翻页的两半都走 `await root.up` 且从不传 `branch: root.branch`、`_rootUpScope` 三个探测的顺序、`_setRoot(hash)` 在 reveal 第一个 await 之前，以及行的排版不变量（`.msg` 的 flex、`.refs` 的上限、`.chip-name` 的省略号、`.chip-more` 的 `flex: none`、`no-refs` 不得复活）。
+- `src/test/gitParsing.test.ts` 新增 `parseContainingBranchRefs` 三例：本地名排在远程名前、丢掉 `refs/remotes/*/HEAD` 与标签 / stash、空输出给空数组。
+
+### 文档
+
+- AGENTS.md：§7 提交行那条改写为"消息吃剩余 + 徽章列封顶 20% + 省略号只切 `.chip-name` + 禁止用 `no-refs` 隐藏徽章"；§8 新增「全部分支 = `--branches --remotes`（`countCommitsAfter` 必须同范围）」与「rooted 列表上半段走 `_rootUpScope()` 解析出的 ref」两条，并把 `_firstPageRows` 那条的计数写成 `rev-list --count <up> --not <hash>`。
+
+### 验证
+
+- compile / lint（0 error，66 warning）/ test 全绿，399 例 93 组。
+- 真实仓库核对：`--all` 201 行 vs `--branches --remotes` 198 行，修复后列表里 agent 检查点提交 0 条、标签徽章仍在。
+- 预览 harness + headless Chrome 量过 260 / 330 / 480 / 700 / 1180px 五档行宽（数字见上）。
+
+## [0.1.9] - 2026-10-31
+
+本版主题是标签：推送前先问远端、本地与远端一次看清、每一行都能就地处理；提交行的引用徽章收成一枚，消息回到最前面。途中修掉一个"打包后附注标签全成假差异"的解析错误——它不是显示问题，而是把整个仓库的标签都判成了"两边不同"。
+
+### 新增
+
+- **标签推送先读远端**（`GitService.pushTags`；纯函数 `parseLsRemoteTags` / `parseTagRefList` / `diffTagRefs`，`src/services/gitUtils.ts`；单测 `src/test/gitService.test.ts` 新增四组）。原先「推送全部标签」把本地标签直接交给 `git push`：远端已有同名标签且指向别的提交时 git 非快进拒绝，整批推送一起失败，用户只看到一句 push failed，其余标签到底推上去没有无从判断。现在先 `ls-remote --tags` 读一次远端：同提交 → 视为已在远端、不重复发送（`upToDate`）；不同提交 → 保留远端原值并单独警告（`diverged`，交给「标签管理」处理）；远端没有才进入"标签所在提交必须在目标远端分支上"的既有闸门（`skipped`）。`ls-remote` 失败（离线 / 认证）只当拿不到清单，退回原路径让 `git push` 自己报错。结果按 pushed / skipped / upToDate / diverged 四类汇总。「推送标签…」选择器也读一次远端（`src/commands/tagCommands.ts` 的 `pushTag`）：指向同一提交的标签不列出，指向不同的保留但标注"推送会被跳过"，读不到远端退回原来的完整列表，让推送自己报错。
+- **「标签管理」对话框**（`idea-git.remoteTags`，`src/commands/tagCommands.ts` + `media/webview.js` 的 `showTagSyncDialog` / `.tag-sync-table` / `TAG_SYNC_OPS`）。前身是「远端标签差异…」，现在把两侧全部标签列进同一张表：`inSync` 行默认被「只看差异」筛掉（复选框默认勾选），差异行按 remoteOnly / localOnly / different 给出操作。每一行都能处理：`inSync` 给「删本地／删远端」，指向不同给「保留／覆盖本地／删远端」，仅一侧给拉取或推送。**只有选了真正会执行的动作才能勾选**——默认 `keep` 的行复选框禁用，点动作即勾选该行，「全选」只选可执行行，否则"已选择 N"与实际执行的行对不上。没有配置远端时跳过 `ls-remote`，表格退化为只读的本地标签清单（标题「标签管理 · 仅本地」，无操作列 / 勾选框 / 统计 / 筛选），两侧都空才只给一句提示。
+- **提交号点开进第三栏**（`tagSyncCommit` → 宿主走主屏幕同一套 `setDetail`，带 `origin: 'tagSync'` 因而不校验 `selectedHash`）：每行的本地 / 远端提交号是按钮，点一下右侧显示该提交的完整信息与文件列表。对话框遮罩的 `right` 收在 `#right` 左缘（`syncTagSyncBounds`），第三栏在对话框打开时仍可滚动、双击文件；`#right` 隐藏后遮罩铺满，所以对话框头部自带一个眼睛按钮——列自己的眼睛会随列一起消失，没有这个镜像就再也点不回来。第三栏提交卡片补上所在分支与标签（`CommitDetail.refs/tags`；命中 `_commitIndex` 直接复用行上的 refs，未命中走 `GitService._refsAtCommit` 的一次 `for-each-ref`，比对 `objectname` 与 `*objectname`，轻量 / 附注标签都认，`HEAD` 过滤掉）。
+- **提交行一个徽章 + 悬浮全量**（`refsTagsFirst` 在宿主把标签排到分支前；`media/webview.js` 的 `refChipHtml` / `.refs-popover`，z-index 9500）：标签与它所在的分支曾经并排成两枚徽章，长分支名会把行挤满；现在只取 `refs[0]`，其余折成 `+N`，悬浮逐条列出（标签黄 / 远程分支紫 / 本地分支蓝 / 当前分支实心）。定位沿用"先摆再校"：按徽章列的 left / bottom+4 摆好用渲染矩形复核，底部不够翻到上方；滚动、按下、行重建、鼠标离开都收起——重建后锚点节点已不在文档里，不收起就会浮在旧位置。
+- **删除标签的目的地一次问清**（`idea-git.deleteTag`）：确认框给「删除本地 / 删除本地和远端 / 取消」；选后者**先删远端再删本地**，网络那半失败（凭据、保护规则）不会连累用户同样要求的本地清理；`remote ref does not exist` 不算失败，那是"本来就没得删"。同时去掉 `showDialog` 的 30 秒墙钟兜底——挂时钟会在用户还没选的时候释放监听、留下点不动的按钮；改为视图隐藏 / 销毁时结算，面板不可见时退回原生模态框。批量「删除标签…」（`idea-git.deleteTags`）先多选标签，确认框明说本地与远端一起删，**只有每个远端删除都成功才动本地**，任一失败整体中止并提示重试，不留下"远端删了、本地还在"的半截状态。
+- **无远端时不再黑盒失败**（`ensureRemote`）：推送标签前先确认有远端，否则提示"标签只能保存在本地"并给「管理远端」入口；删除框在无远端时把文案改成"此仓库没有配置远端，只能删除本地标签"，不再让 `git push origin` 甩出一句看起来像仓库损坏的 fatal。
+- **提示语收敛**（`summarizeNames`）：超过 3 个标签名就写成"前 3 个… (N)"，用于推送 / 删除的确认框、进度标题与结果提示；只有一个标签时仍给完整名字。quick pick 仍列全量——那是选择器，不是提示。
+
+### 变更
+
+- **工具栏标签菜单**改为「推送标签… / 删除标签… / 标签管理…」：「推送全部标签」撤出菜单（`idea-git.pushAllTags` 只留在命令面板）；`package.json` 与两份 `package.nls*.json` 新增 `idea-git.deleteTags` / `idea-git.pushAllTags` / `idea-git.remoteTags` 声明，`idea-git.deleteTag` 标题从"删除本地标签"改为"删除标签"。
+- **提交行排版**：消息在前、徽章在后（IDEA Log 的顺序）——`.msgline` 的 `.msg` 保持自然宽度，徽章列 `flex: none`，行窄时只让消息出省略号。消息 tooltip 删掉重复的分支两行，分支与标签只在徽章这一处出现。
+
+### 修复
+
+- **打包后的附注标签全被误判成"指向不同提交"**（`GitService.getTagRefs` 取代 `RefsReader` 读文件路径成为主路径）：clone 或 gc 之后附注标签对象待在 pack 里，`RefsReader` 只能 inflate 松散对象，拿回来的是 tag 对象哈希；`ls-remote` 给的是剥开后的提交哈希，两边一比每个附注标签都成了差异——实测 svelte 仓库 1035 条全部假冲突，而且这个哈希不对应任何提交，标签徽章一起消失。改为 `for-each-ref refs/tags --format=%(objectname)\t%(*objectname)\t%(refname:short)`（`parseTagRefList`，`%(*objectname)` 为空则回落到 `%objectname`，轻量标签不受影响），3s 缓存 + in-flight Promise 去重，`invalidateVolatile()` 清缓存；读文件保留为无 git 时的兜底。`listTags` / `getTagsAt` 随之变异步，调用点全部 `await`。
+- **形如 `feat/x` 的本地分支被当成远程**（`isRemoteRefName`）：以前见到 `/` 就当远程，本地带斜杠的分支会拿到云图标；改为按 `state.remote` 里的远程名首段比对，`remotes/` 前缀兜底。
+- **「标签管理」操作列被挤出可视区**（`media/webview.css` + `webview.js` 的 ResizeObserver）：表格曾带 `min-width: 720px`，在 1100px 宽的宿主要求下操作列直接被横向滚动条吃出屏幕。表格宽度改跟面板（`#right` 可拖动，媒体查询量不到），密度由表格自身的 `ResizeObserver` 切 `compact`（<640 隐藏提交号列）与 `narrow`（<460 再隐藏状态徽章），操作列永远留在可视区。
+- **对话框遮罩压住第三栏分隔条**（`media/webview.js` + `media/webview.css`）：遮罩右缘 = `#right` 左缘，而 5px 分隔条正好就在那条边上——用户点提交号看到被截断的文件路径后，想拖宽第三栏毫无反应。`body.tag-sync-open #resizer-right { z-index: 2100 }` 把分隔条抬到遮罩（2000）之上；`setup()` 的 `onMove` 回调 `syncTagSyncBounds()`，遮罩跟着分隔条走（只在 `resize` 同步会让对话框停在旧边界上）；被拖拽钉死过宽度的对话框（`attachDialogResize` 写了内联 `width`）在第三栏变宽时钳到遮罩内，否则它会反过来压住刚被拖出来看文件的那一栏。CSS 定宽的框自己会缩，不受影响。
+- **远端标签指向的提交还没拉到本地**：`git show` 报 `bad object` 时提示"先拉取对应标签"，不把 git 的报错原样甩给用户。
+
+### 文档
+
+- README 中英 What's New 换成标签管理，Features / Tags 与概览同步（提交行徽章、第三栏引用、删除标签目的地、推送前先读远端）；`docs/CSDN-GitCharm使用说明.md` 补「标签管理」小节与常用操作行。
+- AGENTS.md：§7 补提交行"消息在前、徽章在后 / 一枚徽章 + 悬浮全量 / 远程判定只看远程名"与第三栏提交卡片展示引用；§8 补标签管理对话框的不变量（遮罩让出第三栏分隔条、密度按表格宽度、可勾选范围、bad object 提示）、删除标签的目的地与"先删远端"、工具栏菜单构成、`summarizeNames`。
+
+### 验证
+
+- compile / lint（0 error，66 warning）/ test 全绿，386 例 89 组（`src/test/gitService.test.ts` 新增 `refsTagsFirst`、`parseLsRemoteTags`、`parseTagRefList`、`diffTagRefs` 四组，135 行）。
+- 预览 harness（headless Chrome）验证「标签管理」对话框：分隔条在遮罩之上可拖、遮罩随拖动收放（右缘 1022 → 862）、拖回后 1162；钉宽度的对话框按遮罩钳回（boxRight 610 ≤ overlayRight 622）；取消后对话框移除且 `body.tag-sync-open` 清掉。预览夹具补了一个标签，覆盖多引用徽章与各类图标。
+- 待复验（需要真实工作台）：标签管理对话框的表格密度与操作列、推送 / 删除确认、附注标签在打包仓库里的徽章位置；`media/` 改动后开发宿主跑旧代码，必须完全重启，必要时 bump 版本号让缓存失效。
+
+## [0.1.8] - 2026-10-30
+
+本版的主题是"历史看得更细"：新增一个独立面板，把 blame 那一行追溯到被改写的每一次，并把差异收敛到选中的几行；文件历史复用同一个面板；面板与对话框修掉三处排版问题；写操作撞上遗留锁文件不再只能手动清。
+
+### 新增
+
+- **选中行历史面板**（新增 `src/services/lineHistory.ts`、`src/views/lineHistoryPanel.ts`、`media/lineHistory.{js,css}`；入口 `idea-git.lineHistory`，键位 `Alt+H`，编辑器右键菜单同入口）。它**不是 `mainView` 的第四栏**，而是一个独立 `WebviewPanel`（`retainContextWhenHidden`：切回编辑器再回来不该重跑 blame）。四条硬规定写进了 AGENTS.md §8：
+  - **blame 跑在编辑器缓冲区上**（`git blame --porcelain --contents - -L a,b -- <rel>` + stdin = `doc.getText()`）。按磁盘文件跑 blame 时，未保存的修改会让行号错位；旧设计"把脏行从集合剔除"是错的——用户改了一行再看历史，会看到自己那行的上一版被标成别人的提交。
+  - **链条排序用 `committerTime` 降序**（`commitsForLines`）：作者时间被 rebase/amend 保留、落地顺序却相反，按 `authorTime` 排会把最新提交排到最后。
+  - **renames 靠 porcelain 每个提交的 `filename` 字段**：那是该提交时文件的名字，diff 必须用 `commit.path`。用当前路径去 diff 更早的提交，git 只会回一句"没有这个文件"，卡片无声空白。
+  - **下方差异默认只显示选中行的改动**：头部 `<sha> <orig> <final>` 里 **orig 行号**才是这些行在该提交里的位置（final 是今天缓冲区的行号，拿去 diff 会指错行），`parseUnifiedDiff` 只保留新侧区间覆盖这些行的 hunk，再按 ±3 行裁剪（`trimToHits`，缺口画 `⋯`）。初始导入是一个覆盖全文的 hunk，不裁剪的话"只选一行"仍然会画出整文件。头部按钮可切"整文件"，两种口径各自进缓存 key（`_diffKey`）。
+- **重写链**（`parseLineLog` / `buildLineLogArgs` / `mergeChain` + 单测 `src/test/lineHistory.test.ts`）：blame 只给出"最后是谁改的"，`git log -L a,b:<path>` 才能补出被再次改写、blame 已经看不见的那些提交，两者合并去重成一条链。
+- **未提交条目钉在最上面**（`worktreeEntry`）：与工作区对照，行内容预览显示当前缓冲区的文字。
+- **每条提交的行内容预览**：`git show <hash>:<path>` 取当时整份文件，截取对应的行段——列表因此读起来是"这一行的历史"，而不是"一串提交人"。
+- **面板单例 + 请求代次**：同文件再触发 = 换目标 + 清 diff 缓存 + 重载（不新开 tab），`_current` 在 `onDidDispose` 里清空；webview 侧 `requestId` 逐次自增，宿主回的 `lh.diff` 只认当前选中 + 当前 requestId（快速连点会乱序）。分页在 webview 内做（`PAGE = 10` + "加载更多"），宿主一次给全量提交集合。差异端点照旧 `getDiffBase(hash)` + `openEditorDiff`（二进制闸门也照旧）。
+- **文件历史复用同一面板**（`LineHistoryTarget.mode: 'lines' | 'file'`，新增 `src/services/fileHistory.ts` 的 `buildFileLogArgs` / `parseFileLog`；配置 `idea-git.fileHistory` 默认 `custom`，`native` 走 `files.openTimeline`）。列表来自一次 `git log --follow --name-status --no-merges --format=%x1e%H%x00%an%x00%at%x00%ct%x00%s -n 1000 -- <path>`，`parseFileLog` 取每个提交**当时**的文件名（重命名取 `Rxxx old new` 的新名，diff 必须用它），所以列表没有行号范围、diff 恒为整文件，webview 按 `mode` 隐藏范围标签与"整文件"开关。面板单例按模式各一个（`_current` 是 `Map<mode, panel>`），行历史与文件历史互不覆盖。
+- **「全部分支」作用域**（`media/webview.js`：分支树 HEAD 段下的条目 + 空态按钮；i18n `w.allBranches` / `w.allBranchesHint` / `filter.searchAllBranches`）：单击即把提交列表切到 `--all`，搜索随之跨分支；单分支下筛选无结果时，空态直接给「在所有分支中搜索」，不用先去树里找选项。
+- **遗留锁文件恢复**（`GitService._execWithLockRecovery` / `_lockFileFromError` + `gitUtils.findStaleLock`；单测 `src/test/gitService.test.ts` 的 `findStaleLock` 一组）：检出过程中关掉编辑器会留下 `index.lock` / `<ref>.lock`，之后每次写都是同一条 `fatal: Unable to create '<path>': File exists.`。`_execMutate` / `_execMutateWithEnv` / `_execNetwork` 一律经这层：`findStaleLock` 只认 `Unable to create '<path>':` 这一种形状，路径再解析进 `resolveGitDir()` / `commonDir` 之内、且确实是已存在的 `.lock` 文件，才弹一个写明"删除会重试、真有进程在跑就别删"的模态框；同意后 `unlink` 并把原命令重试一次，删不掉就把原错误抛回去。**禁止静默删除**；`cannot lock ref '…': is at … but expected …` 是并发更新，不动它。后台 `fetchSilent` 故意走裸路径，无人值守时不会弹框。
+
+### 变更
+
+- **行 / 文件历史列表压成一行一条**（`media/lineHistory.js` 的 `renderList` / `media/lineHistory.css`）：每条从"上哈希下作者"的双行改成单行 `.lh-row-main`（哈希或脏点 + 消息 + 作者 + 时间 + 改写行数），只有行模式的"当时内容"保留第二行；`#lh-head` 收到 `4px 10px 3px`、`#lh-list` 的 `max-height` 由 45% → 38% → 30%。实测 stub-vscode 渲染：文件模式 10 行约 185px，行模式（两行/条）约 35px/条，都在 30% 封顶内滚动，下方差异区拿回大半高度。移除 `.lh-row-top` / `.lh-row-bottom`。
+- **仓库名省略号**（`media/webview.css` 第三栏表头）：表头仓库名是任意长度的目录名，`min-content` 撑开后把眼睛/刷新按钮顶出面板；名字改单行省略号（完整名进自定义 tooltip），两个按钮 `flex: none`。
+- **操作历史对话框去掉空白条**：列表曾预留 200px 最小高度，五条记录下面留一条空白；改为由内容撑高，空态自己带高度。
+- **菜单项改名**：原「查看文件所有历史提交」「行历史：选中行（或当前行）的提交记录」太长，右键菜单里一眼读不完，改成「文件历史」「选中行历史」（`package.nls*.json`）。文件历史默认面板落地后，「文件历史(原生)」又改回「文件历史」——它现在有两种界面，名字里再带"原生"就只说了其中一种。
+
+### 文档
+
+- README 头部改成市场页常见的版式（居中图标 + 徽章 + 语言切换），新增 `## What's New` / `## 新增功能` 置顶，配行级历史实拍图 `resources/screenshots/line-history.png`；原三栏介绍收进 `## Overview` / `## 概览`。版本 / 安装量 / 评分徽章从 shields.io（其 `visual-studio-marketplace` 系列已下线，渲染成"retired badge"）换到 `vsmarketplacebadges.dev`。
+- README 中英 + `docs/CSDN-GitCharm使用说明.md` 同步本版的「全部分支」「文件历史默认面板」「选中行历史」条目；AGENTS.md §8 补三条（行历史面板的四条硬规定、文件历史复用面板、锁文件恢复；已在 §3 的锁恢复条目里写全）。
+
+### 验证
+
+- compile / lint（0 error，66 warning）/ test 全绿，372 例（新增 `src/test/lineHistory.test.ts` 守 porcelain blame、`git log -L` 解析与链条合并、diff 行裁剪，`src/test/fileHistory.test.ts` 守重命名与 `--follow` 解析，`gitService.test.ts` 增 `findStaleLock` 一组）。
+- stub-vscode Node harness 跑真实 `LineHistoryPanel` 构建：文件模式 10 行列表高度约 185px，行模式两行条约 35px/条；`parseFileLog` / `parseLineLog` / `mergeChain` / `trimToHits` 用例覆盖重命名、根提交、脏行、缺口裁剪。
+- 预览 harness（headless Chrome）检查行历史与文件历史的面板版式；README 用 `marked` + headless Chrome 渲染核对置顶内容与徽章。
+- 待复验（需要真实工作台）：选中行历史 / 文件历史面板本体、`Alt+H` 键位、全部分支作用域、锁文件询问框；`media/` 改动后开发宿主跑旧代码，必须完全重启，必要时 bump 版本号让缓存失效。
 
 ## [0.1.7] - 2026-10-27
 
